@@ -1,0 +1,12 @@
+camera:
+  exposure: 10000.0 # 曝光时间 (us)
+  gain: 5.9     # 增益值 (dB)
+serial:
+  enabled: false  # 是否启用串口连接 (true/false)
+  primary_port: '/dev/my_stm32'
+  baudrate: 115200
+  backup_ports:
+    - '/dev/backup_stm32'
+    - '/dev/ttyACM0'
+    - '/dev/ttyACM1'
+    - '/dev/my_stm32'
