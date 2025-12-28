@@ -1,14 +1,39 @@
 import cv2
 import numpy as np
 from collections import deque
-#识别
-# 全局变量声明
-GUI_AVAILABLE = False  # 默认为False，将在create_trackbars中尝试创建窗口时更新
+import yaml
+import os
+
+# 默认 HSV 值（当配置文件不存在时使用）
 DEFAULT_HSV_VALUES = {
-    'H min': 24, 'H max': 83, 
-    'S min': 31, 'S max': 253,
-    'V min': 123, 'V max': 255
+    'h_min': 24, 'h_max': 83, 
+    's_min': 31, 's_max': 253,
+    'v_min': 123, 'v_max': 255
 }
+
+# 从配置文件加载 HSV 参数
+def load_hsv_config():
+    config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+            if config and 'hsv' in config:
+                hsv_config = config['hsv']
+                return {
+                    'h_min': hsv_config.get('h_min', DEFAULT_HSV_VALUES['h_min']),
+                    'h_max': hsv_config.get('h_max', DEFAULT_HSV_VALUES['h_max']),
+                    's_min': hsv_config.get('s_min', DEFAULT_HSV_VALUES['s_min']),
+                    's_max': hsv_config.get('s_max', DEFAULT_HSV_VALUES['s_max']),
+                    'v_min': hsv_config.get('v_min', DEFAULT_HSV_VALUES['v_min']),
+                    'v_max': hsv_config.get('v_max', DEFAULT_HSV_VALUES['v_max']),
+                }
+    except Exception as e:
+        print(f"[警告] 加载 HSV 配置失败: {e}，使用默认值")
+    return DEFAULT_HSV_VALUES.copy()
+
+# 加载 HSV 配置
+HSV_VALUES = load_hsv_config()
+print(f"[HSV配置] H:{HSV_VALUES['h_min']}-{HSV_VALUES['h_max']} S:{HSV_VALUES['s_min']}-{HSV_VALUES['s_max']} V:{HSV_VALUES['v_min']}-{HSV_VALUES['v_max']}")
 
 class KalmanFilter2D:
     def __init__(self):
@@ -259,7 +284,7 @@ class GreenLightDetector:
             return False, 0, None
 
         # 面积阈值（可按需调整）
-        min_area_threshold = 100
+        min_area_threshold = 200
 
         # 选出所有面积>=阈值的候选轮廓（不只取最大）
         candidate_contours = [c for c in contours if cv2.contourArea(c) >= min_area_threshold]
@@ -343,59 +368,274 @@ def detect_green_light_and_offset(frame, lower_hsv, upper_hsv):
 
 def create_trackbars():
     """
-    创建滑动条，用于调节 HSV 阈值
-    如果无法创建窗口，将使用默认值
+    占位函数，保持兼容性
+    HSV 参数现在从 config.yaml 读取
     """
-    global GUI_AVAILABLE
-    try:
-        cv2.namedWindow('HSV Trackbars')
-        # 根据图像中的绿光特征调整HSV范围 - 更宽松的范围
-        cv2.createTrackbar('H min', 'HSV Trackbars', 30, 179, lambda x: None)  # 进一步降低H下限
-        cv2.createTrackbar('H max', 'HSV Trackbars', 90, 179, lambda x: None)  # 进一步提高H上限
-        cv2.createTrackbar('S min', 'HSV Trackbars', 30, 255, lambda x: None)  # 进一步降低S下限
-        cv2.createTrackbar('S max', 'HSV Trackbars', 255, 255, lambda x: None)
-        cv2.createTrackbar('V min', 'HSV Trackbars', 120, 255, lambda x: None)  # 调整V下限
-        cv2.createTrackbar('V max', 'HSV Trackbars', 255, 255, lambda x: None)
-        GUI_AVAILABLE = True
-    except cv2.error:
-        print("[INFO] OpenCV GUI不可用，使用默认HSV值")
-        GUI_AVAILABLE = False
+    pass
 
 def get_trackbar_values():
     """
-    获取滑动条的 HSV 阈值
-    如果GUI不可用，则返回默认值
+    获取 HSV 阈值（从配置文件加载）
     :return: lower_hsv, upper_hsv
     """
-    if GUI_AVAILABLE:
-        try:
-            h_min = cv2.getTrackbarPos('H min', 'HSV Trackbars')
-            h_max = cv2.getTrackbarPos('H max', 'HSV Trackbars')
-            s_min = cv2.getTrackbarPos('S min', 'HSV Trackbars')
-            s_max = cv2.getTrackbarPos('S max', 'HSV Trackbars')
-            v_min = cv2.getTrackbarPos('V min', 'HSV Trackbars')
-            v_max = cv2.getTrackbarPos('V max', 'HSV Trackbars')
-        except cv2.error:
-            # 如果获取轨迹条失败，使用默认值
-            h_min = DEFAULT_HSV_VALUES['H min']
-            h_max = DEFAULT_HSV_VALUES['H max']
-            s_min = DEFAULT_HSV_VALUES['S min']
-            s_max = DEFAULT_HSV_VALUES['S max']
-            v_min = DEFAULT_HSV_VALUES['V min']
-            v_max = DEFAULT_HSV_VALUES['V max']
-    else:
-        # 使用默认值
-        h_min = DEFAULT_HSV_VALUES['H min']
-        h_max = DEFAULT_HSV_VALUES['H max']
-        s_min = DEFAULT_HSV_VALUES['S min']
-        s_max = DEFAULT_HSV_VALUES['S max']
-        v_min = DEFAULT_HSV_VALUES['V min']
-        v_max = DEFAULT_HSV_VALUES['V max']
-    
-    lower_hsv = np.array([h_min, s_min, v_min])
-    upper_hsv = np.array([h_max, s_max, v_max])
-    
+    lower_hsv = np.array([HSV_VALUES['h_min'], HSV_VALUES['s_min'], HSV_VALUES['v_min']])
+    upper_hsv = np.array([HSV_VALUES['h_max'], HSV_VALUES['s_max'], HSV_VALUES['v_max']])
     return lower_hsv, upper_hsv
+
+
+# ============================================================================
+# HSV 调试工具（独立模块）
+# 使用方法：取消下方注释，单独运行此文件进行 HSV 调参
+# 命令：
+#   python opencv_green_detection.py --debug --video <视频路径>   # 视频模式
+#   python opencv_green_detection.py --debug --hik                # 海康相机模式
+# ============================================================================
+
+def run_hsv_debug_tool(source_type='video', source_path=None):
+    '''
+    HSV 滑动条调试工具
+    用于调试和确定最佳 HSV 阈值
+    
+    参数:
+        source_type: 'video' 或 'hik'
+        source_path: 视频文件路径（仅 video 模式需要）
+    '''
+    # 检查是否有 GUI 支持
+    try:
+        cv2.namedWindow('HSV Debug Tool')
+    except cv2.error:
+        print("[错误] OpenCV 不支持 GUI，请安装 opencv-python（非 headless 版本）")
+        print("安装命令: pip install opencv-python")
+        return
+    
+    # 创建滑动条
+    cv2.createTrackbar('H min', 'HSV Debug Tool', HSV_VALUES['h_min'], 179, lambda x: None)
+    cv2.createTrackbar('H max', 'HSV Debug Tool', HSV_VALUES['h_max'], 179, lambda x: None)
+    cv2.createTrackbar('S min', 'HSV Debug Tool', HSV_VALUES['s_min'], 255, lambda x: None)
+    cv2.createTrackbar('S max', 'HSV Debug Tool', HSV_VALUES['s_max'], 255, lambda x: None)
+    cv2.createTrackbar('V min', 'HSV Debug Tool', HSV_VALUES['v_min'], 255, lambda x: None)
+    cv2.createTrackbar('V max', 'HSV Debug Tool', HSV_VALUES['v_max'], 255, lambda x: None)
+    
+    cap = None
+    hik_camera = None
+    frame = None
+    
+    if source_type == 'hik':
+        # 海康相机模式
+        try:
+            import sys
+            from ctypes import cast, byref, sizeof, memset, c_ubyte, POINTER
+            
+            if sys.platform.startswith("win"):
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'MvImport'))
+                import MvImport.MvCameraControl_class as MvCamera_module
+            else:
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'MvImport_Linux'))
+                import MvImport_Linux.MvCameraControl_class as MvCamera_module
+            
+            # 获取需要的类和常量
+            MvCamera = MvCamera_module.MvCamera
+            MV_CC_DEVICE_INFO_LIST = MvCamera_module.MV_CC_DEVICE_INFO_LIST
+            MV_CC_DEVICE_INFO = MvCamera_module.MV_CC_DEVICE_INFO
+            MV_GIGE_DEVICE = MvCamera_module.MV_GIGE_DEVICE
+            MV_USB_DEVICE = MvCamera_module.MV_USB_DEVICE
+            MV_ACCESS_Exclusive = MvCamera_module.MV_ACCESS_Exclusive
+            MVCC_INTVALUE_EX = MvCamera_module.MVCC_INTVALUE_EX
+            MV_FRAME_OUT_INFO_EX = MvCamera_module.MV_FRAME_OUT_INFO_EX
+            
+            # 枚举设备
+            deviceList = MV_CC_DEVICE_INFO_LIST()
+            ret = MvCamera.MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, deviceList)
+            if ret != 0 or deviceList.nDeviceNum == 0:
+                print("[错误] 未找到海康相机")
+                return
+            
+            # 创建相机实例
+            hik_camera = MvCamera()
+            stDeviceList = cast(deviceList.pDeviceInfo[0], POINTER(MV_CC_DEVICE_INFO)).contents
+            ret = hik_camera.MV_CC_CreateHandle(stDeviceList)
+            if ret != 0:
+                print(f"[错误] 创建相机句柄失败: 0x{ret:X}")
+                return
+            
+            ret = hik_camera.MV_CC_OpenDevice(MV_ACCESS_Exclusive, 0)
+            if ret != 0:
+                print(f"[错误] 打开相机失败: 0x{ret:X}")
+                return
+            
+            # 加载相机配置
+            config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    if config and 'camera' in config:
+                        exposure = config['camera'].get('exposure', 10000.0)
+                        gain = config['camera'].get('gain', 5.9)
+                        hik_camera.MV_CC_SetFloatValue("ExposureTime", exposure)
+                        hik_camera.MV_CC_SetFloatValue("Gain", gain)
+                        print(f"[相机配置] 曝光: {exposure}, 增益: {gain}")
+            except:
+                pass
+            
+            ret = hik_camera.MV_CC_StartGrabbing()
+            if ret != 0:
+                print(f"[错误] 开始取流失败: 0x{ret:X}")
+                return
+            
+            # 获取数据包大小
+            stParam = MVCC_INTVALUE_EX()
+            memset(byref(stParam), 0, sizeof(MVCC_INTVALUE_EX))
+            hik_camera.MV_CC_GetIntValueEx("PayloadSize", stParam)
+            data_size = stParam.nCurValue
+            pData = (c_ubyte * data_size)()
+            stFrameInfo = MV_FRAME_OUT_INFO_EX()
+            
+            print("[成功] 海康相机已连接")
+            
+        except Exception as e:
+            print(f"[错误] 初始化海康相机失败: {e}")
+            return
+    else:
+        # 视频模式
+        if not source_path:
+            print("[错误] 请指定视频文件路径")
+            print("使用方法: python opencv_green_detection.py --debug --video <视频路径>")
+            return
+        cap = cv2.VideoCapture(source_path)
+        if not cap.isOpened():
+            print(f"[错误] 无法打开视频: {source_path}")
+            return
+        print(f"[成功] 已加载视频: {source_path}")
+    
+    print("=" * 60)
+    print("HSV 调试工具已启动")
+    print("按 'q' 退出并打印当前 HSV 值")
+    print("按 's' 保存当前 HSV 值到 config.yaml")
+    print("按 空格 暂停/继续（仅视频模式）")
+    print("=" * 60)
+    
+    paused = False
+    
+    while True:
+        if source_type == 'hik':
+            # 从海康相机读取帧
+            memset(byref(stFrameInfo), 0, sizeof(stFrameInfo))
+            ret = hik_camera.MV_CC_GetOneFrameTimeout(pData, data_size, stFrameInfo, 1000)
+            if ret == 0:
+                data = np.frombuffer(pData, dtype=np.uint8)
+                frame = data.reshape((stFrameInfo.nHeight, stFrameInfo.nWidth))
+                # 转换颜色格式
+                if stFrameInfo.enPixelType == 17301505:  # Mono8
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                else:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BAYER_BG2BGR)
+            else:
+                continue
+        else:
+            # 从视频读取帧
+            if not paused:
+                ret, frame = cap.read()
+                if not ret:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+        
+        if frame is None:
+            continue
+        
+        # 获取滑动条值
+        h_min = cv2.getTrackbarPos('H min', 'HSV Debug Tool')
+        h_max = cv2.getTrackbarPos('H max', 'HSV Debug Tool')
+        s_min = cv2.getTrackbarPos('S min', 'HSV Debug Tool')
+        s_max = cv2.getTrackbarPos('S max', 'HSV Debug Tool')
+        v_min = cv2.getTrackbarPos('V min', 'HSV Debug Tool')
+        v_max = cv2.getTrackbarPos('V max', 'HSV Debug Tool')
+        
+        lower_hsv = np.array([h_min, s_min, v_min])
+        upper_hsv = np.array([h_max, s_max, v_max])
+        
+        # 创建掩膜
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+        
+        # 调整图像尺寸以适应显示（缩小到合适大小）
+        display_width = 640  # 每个窗口宽度
+        h, w = frame.shape[:2]
+        scale = display_width / w
+        display_height = int(h * scale)
+        
+        # 缩放图像
+        frame_resized = cv2.resize(frame, (display_width, display_height))
+        mask_resized = cv2.resize(mask, (display_width, display_height))
+        
+        # 在原图上显示当前HSV值
+        frame_display = frame_resized.copy()
+        info_text = f"H:{h_min}-{h_max} S:{s_min}-{s_max} V:{v_min}-{v_max}"
+        cv2.putText(frame_display, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # 显示：左边原图，右边掩膜
+        display = np.hstack([frame_display, cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)])
+        cv2.imshow('HSV Debug Tool', display)
+        
+        key = cv2.waitKey(30) & 0xFF
+        if key == ord('q'):
+            print("\\n" + "=" * 60)
+            print("当前 HSV 值:")
+            print(f"  H: {h_min} - {h_max}")
+            print(f"  S: {s_min} - {s_max}")
+            print(f"  V: {v_min} - {v_max}")
+            print("\\n复制到 config.yaml:")
+            print("hsv:")
+            print(f"  h_min: {h_min}")
+            print(f"  h_max: {h_max}")
+            print(f"  s_min: {s_min}")
+            print(f"  s_max: {s_max}")
+            print(f"  v_min: {v_min}")
+            print(f"  v_max: {v_max}")
+            print("=" * 60)
+            break
+        elif key == ord('s'):
+            config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+                config['hsv'] = {
+                    'h_min': h_min, 'h_max': h_max,
+                    's_min': s_min, 's_max': s_max,
+                    'v_min': v_min, 'v_max': v_max
+                }
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+                print(f"[成功] HSV 值已保存到 {config_path}")
+            except Exception as e:
+                print(f"[错误] 保存失败: {e}")
+        elif key == ord(' ') and source_type == 'video':
+            paused = not paused
+            print("[暂停]" if paused else "[继续]")
+    
+    # 清理资源
+    if cap:
+        cap.release()
+    if hik_camera:
+        hik_camera.MV_CC_StopGrabbing()
+        hik_camera.MV_CC_CloseDevice()
+        hik_camera.MV_CC_DestroyHandle()
+    cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    import sys
+    
+    if len(sys.argv) < 3 or sys.argv[1] != '--debug':
+        print("HSV 调试工具使用方法:")
+        print("  视频模式:   python opencv_green_detection.py --debug --video <视频路径>")
+        print("  海康相机:   python opencv_green_detection.py --debug --hik")
+    elif sys.argv[2] == '--hik':
+        run_hsv_debug_tool(source_type='hik')
+    elif sys.argv[2] == '--video' and len(sys.argv) > 3:
+        run_hsv_debug_tool(source_type='video', source_path=sys.argv[3])
+    else:
+        print("参数错误，请检查命令格式")
+
 
 def get_debug_images():
     """

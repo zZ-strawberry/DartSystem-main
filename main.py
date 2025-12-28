@@ -3,6 +3,7 @@ import yaml
 import os
 import cv2
 import numpy as np
+import threading
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QFileDialog, QSlider, QCheckBox
 from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread
 from PyQt6.QtGui import QImage, QPixmap
@@ -681,7 +682,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'serial_comm') and self.serial_comm is not None:
             print("停止串口接收线程...")
             self.serial_comm.stop()
-            self.serial_comm.wait()  # 等待线程结束
             print("串口接收线程已停止")
         elif not self.config.get('serial', {}).get('enabled', True):
             print("串口连接已禁用，无需关闭")

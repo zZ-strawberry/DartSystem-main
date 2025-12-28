@@ -1,6 +1,15 @@
 camera:
   exposure: 10000.0 # 曝光时间 (us)
   gain: 5.9     # 增益值 (dB)
+
+hsv:
+  h_min: 24
+  h_max: 83
+  s_min: 31
+  s_max: 253
+  v_min: 123
+  v_max: 255
+
 serial:
   enabled: false  # 是否启用串口连接 (true/false)
   primary_port: '/dev/my_stm32'

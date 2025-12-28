@@ -6,13 +6,45 @@ import ctypes
 import os
 
 from ctypes import *
+
+# 获取当前文件所在目录，用于相对导入
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+if _current_dir not in sys.path:
+    sys.path.insert(0, _current_dir)
+
 from CameraParams_const import *
 from CameraParams_header import *
 from MvErrorDefine_const import *
 from PixelType_const import *
 from PixelType_header import *
 
-MvCamCtrldll = ctypes.cdll.LoadLibrary(os.getenv('MVCAM_COMMON_RUNENV') + "/64/libMvCameraControl.so")
+# 加载海康相机SDK库
+# 优先使用环境变量，如果未设置则使用默认路径
+_mvs_lib_path = os.getenv('MVCAM_COMMON_RUNENV', '/opt/MVS/lib')
+_lib_file = os.path.join(_mvs_lib_path, "64", "libMvCameraControl.so")
+
+if not os.path.exists(_lib_file):
+    # 尝试备用路径
+    _backup_paths = [
+        "/opt/MVS/lib/64/libMvCameraControl.so",
+        "/usr/lib/libMvCameraControl.so",
+        "/usr/local/lib/libMvCameraControl.so",
+    ]
+    for _path in _backup_paths:
+        if os.path.exists(_path):
+            _lib_file = _path
+            break
+    else:
+        raise RuntimeError(f"无法找到海康相机SDK库文件。请确保已安装MVS SDK。\n"
+                          f"尝试的路径: {_lib_file}\n"
+                          f"请设置环境变量 MVCAM_COMMON_RUNENV 指向MVS库目录。")
+
+try:
+    MvCamCtrldll = ctypes.cdll.LoadLibrary(_lib_file)
+except OSError as e:
+    raise RuntimeError(f"加载海康相机SDK库失败: {e}\n"
+                      f"库文件路径: {_lib_file}\n"
+                      f"请确保已正确安装MVS SDK并配置了库路径。")
 
 # 用于回调函数传入相机实例
 class _MV_PY_OBJECT_(Structure):

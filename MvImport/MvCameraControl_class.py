@@ -3,8 +3,14 @@
 import sys
 import copy
 import ctypes
+import os
 
 from ctypes import *
+
+# 获取当前文件所在目录，用于相对导入
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+if _current_dir not in sys.path:
+    sys.path.insert(0, _current_dir)
 
 from PixelType_header import *
 from CameraParams_const import *
@@ -13,10 +19,36 @@ from MvErrorDefine_const import *
 
 # Python3.8版本修改Dll加载策略, 默认不再搜索Path环境变量, 同时增加winmode参数以兼容旧版本
 dllname = "MvCameraControl.dll"
-if "winmode" in ctypes.WinDLL.__init__.__code__.co_varnames:
-    MvCamCtrldll = WinDLL(dllname, winmode=0)
-else:
-    MvCamCtrldll = WinDLL(dllname)
+
+# 尝试加载DLL
+try:
+    if "winmode" in ctypes.WinDLL.__init__.__code__.co_varnames:
+        MvCamCtrldll = WinDLL(dllname, winmode=0)
+    else:
+        MvCamCtrldll = WinDLL(dllname)
+except OSError as e:
+    # 尝试常见的安装路径
+    _backup_paths = [
+        r"C:\Program Files (x86)\MVS\Development\DLL\win64\MvCameraControl.dll",
+        r"C:\Program Files\MVS\Development\DLL\win64\MvCameraControl.dll",
+        r"C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64\MvCameraControl.dll",
+    ]
+    _loaded = False
+    for _path in _backup_paths:
+        if os.path.exists(_path):
+            try:
+                if "winmode" in ctypes.WinDLL.__init__.__code__.co_varnames:
+                    MvCamCtrldll = WinDLL(_path, winmode=0)
+                else:
+                    MvCamCtrldll = WinDLL(_path)
+                _loaded = True
+                break
+            except OSError:
+                continue
+    
+    if not _loaded:
+        raise RuntimeError(f"无法加载海康相机SDK DLL文件: {e}\n"
+                          f"请确保已安装MVS SDK并将DLL路径添加到系统PATH环境变量中。")
 
 
 # 用于回调函数传入相机实例
