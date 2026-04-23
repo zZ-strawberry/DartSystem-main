@@ -1,23 +1,18 @@
 [Unit]
-Description=DartSystem Autostart Service
+Description=DartSystem Service
 After=network.target display-manager.service
 Wants=display-manager.service
 
 [Service]
 Type=simple
-User=wolfvision10
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/wolfvision10/.Xauthority
-Environment=QT_QPA_PLATFORM=xcb
+User=dartsystem
+WorkingDirectory=/opt/dartsystem
 Environment=PYTHONUNBUFFERED=1
-Environment=MVCAM_COMMON_RUNENV=/home/wolfvision10/Code/DartSystem/MvImport_Linux
-WorkingDirectory=/home/wolfvision10/Code/DartSystem
-ExecStartPre=/bin/sleep 10
-ExecStart=/bin/bash -c 'cd /home/wolfvision10/Code/DartSystem && source /home/wolfvision10/Code/DartSystem/.venv1/bin/activate && /home/wolfvision10/Code/DartSystem/start_python.sh'
+Environment=QT_QPA_PLATFORM=xcb
+Environment=MVCAM_COMMON_RUNENV=/opt/dartsystem/MvImport_Linux
+ExecStart=/opt/dartsystem/.venv/bin/python /opt/dartsystem/main.py
 Restart=on-failure
-RestartSec=30
-StartLimitIntervalSec=300
-StartLimitBurst=3
+RestartSec=5
 
 [Install]
-WantedBy=multi-user.target 
+WantedBy=multi-user.target

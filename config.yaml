@@ -1,12 +1,85 @@
+# 运行模式
+# mode: hik 使用海康相机实时检测
+# mode: test 使用测试文件，不接相机也能调试
+runtime:
+  mode: "hik"
+
+# test 模式下的测试源设置
+# source: video 或 image
+# path: 测试文件路径，支持相对路径和绝对路径
+# auto_start: true 时程序启动后自动加载测试文件
+test:
+  source: "video"
+  path: ""
+  auto_start: false
+
+# 相机参数
 camera:
-  exposure: 10000.0 # 曝光时间 (us)
-  gain: 5.9     # 增益值 (dB)
+  exposure: 10000.0
+  gain: 5.9
+
+# 串口通信参数
 serial:
-  enabled: false  # 是否启用串口连接 (true/false)
-  primary_port: '/dev/my_stm32'
+  enabled: false
+  primary_port: "/dev/serial/by-id/*"
   baudrate: 115200
+  reconnect_interval_ms: 5000
+  send_every_n_frames: 1
   backup_ports:
-    - '/dev/backup_stm32'
-    - '/dev/ttyACM0'
-    - '/dev/ttyACM1'
-    - '/dev/my_stm32'
+    - "/dev/ttyACM0"
+    - "/dev/ttyACM1"
+    - "/dev/ttyUSB0"
+    - "/dev/ttyUSB1"
+    - "/dev/my_stm32"
+
+# 绿光检测参数
+# hsv: 绿光颜色范围
+# brightness.min_v: 亮度下限，越高越偏向明亮目标
+# contour.min_area/max_area: 总面积范围
+# contour.far_min_area: 判定为远目标的最小面积阈值
+# contour.near_min_area: 判定为近目标的最小面积阈值
+# contour.min_circularity: 越高越要求接近圆
+# contour.min_fill_ratio: 越高越要求轮廓填充得更实
+# morphology: 掩膜去噪强度
+detection:
+  hsv:
+    lower: [24, 31, 123]
+    upper: [83, 253, 255]
+  brightness:
+    min_v: 180
+    max_std: 90
+  morphology:
+    blur_kernel: 5
+    open_kernel: 3
+    close_kernel: 5
+    erode_iterations: 0
+    dilate_iterations: 1
+  contour:
+    min_area: 60
+    max_area: 20000
+    far_min_area: 60
+    near_min_area: 300
+    min_circularity: 0.55
+    min_aspect_ratio: 0.55
+    min_fill_ratio: 0.55
+  circle:
+    min_radius: 4
+    max_radius: 120
+  scoring:
+    brightness_weight: 1.4
+    circularity_weight: 1.2
+    fill_ratio_weight: 1.0
+    center_weight: 0.35
+  debug:
+    console_log_interval_frames: 20
+    draw_rejected: false
+
+# 录屏参数，默认关闭
+recording:
+  enabled: false
+  format: "mkv"
+  capture_method: "xcb"
+  output_dir: "video"
+  display: ":0.0"
+  frame_rate: 10
+  resolution: null
