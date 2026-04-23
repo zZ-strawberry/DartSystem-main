@@ -731,9 +731,21 @@ class MainWindow(QMainWindow):
         result = image_rgb.copy()
         height, width = result.shape[:2]
         center = (width // 2, height // 2)
-        cv2.line(result, (center[0], 0), (center[0], height), (255, 0, 0), 1)
-        cv2.line(result, (0, center[1]), (width, center[1]), (255, 0, 0), 1)
-        cv2.circle(result, center, 5, (255, 0, 0), -1)
+        center_color = (255, 80, 80)
+        cv2.line(result, (center[0], 0), (center[0], height), center_color, 1)
+        cv2.line(result, (0, center[1]), (width, center[1]), center_color, 1)
+        cv2.circle(result, center, 8, center_color, 2)
+        cv2.line(result, (center[0] - 14, center[1]), (center[0] + 14, center[1]), center_color, 2)
+        cv2.line(result, (center[0], center[1] - 14), (center[0], center[1] + 14), center_color, 2)
+        cv2.putText(
+            result,
+            "CENTER",
+            (center[0] + 10, max(24, center[1] - 12)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            center_color,
+            2,
+        )
 
         found = bool(targets)
         lines = [
@@ -759,18 +771,41 @@ class MainWindow(QMainWindow):
             text_y += 28
 
         colors = {"near": (0, 255, 0), "far": (255, 165, 0)}
+        line_colors = {"near": (0, 255, 255), "far": (255, 220, 120)}
         for target in targets:
             x, y, w, h = target["bbox"]
             target_center = target["center"]
             color = colors.get(target["role"], (0, 255, 255))
+            line_color = line_colors.get(target["role"], (255, 255, 0))
+            x_offset, y_offset = target.get("offset", (0, 0))
             cv2.rectangle(result, (x, y), (x + w, y + h), color, 2)
             cv2.drawContours(result, [target["contour"]], -1, color, 2)
-            cv2.circle(result, target_center, 4, (255, 0, 255), -1)
-            cv2.line(result, center, target_center, (255, 255, 0), 2)
-            cv2.putText(result, target["role"].upper(), (x, max(20, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            cv2.circle(result, target_center, 7, color, 2)
+            cv2.circle(result, target_center, 3, (255, 255, 255), -1)
+            cv2.line(result, center, target_center, line_color, 2)
+            cv2.putText(
+                result,
+                target["role"].upper(),
+                (x, max(20, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                color,
+                2,
+            )
+            label_x = min(max(12, (center[0] + target_center[0]) // 2 + 8), max(12, width - 220))
+            label_y = min(max(24, (center[1] + target_center[1]) // 2 - 8), max(24, height - 12))
+            cv2.putText(
+                result,
+                f"dx={x_offset:.1f} dy={y_offset:.1f}",
+                (label_x, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                line_color,
+                2,
+            )
             if "circle" in target:
                 circle_x, circle_y, radius = target["circle"]
-                cv2.circle(result, (circle_x, circle_y), radius, (255, 255, 0), 2)
+                cv2.circle(result, (circle_x, circle_y), radius, line_color, 2)
         return result
 
     def update_detection_status(self, targets, source_name) -> None:
