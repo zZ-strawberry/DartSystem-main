@@ -42,61 +42,118 @@ class GreenLightDetector:
     def detect_green_light(self, frame_rgb: np.ndarray) -> DetectionResult:
         lower_hsv, upper_hsv = self.current_hsv_range()
         hsv = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2HSV)
-
-        green_mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
         value_channel = hsv[:, :, 2]
+        stage_reports = []
+        for stage_name, relaxed in (("strict", False), ("relaxed", True)):
+            mask = self._create_mask(hsv, value_channel, lower_hsv, upper_hsv, relaxed=relaxed)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            candidates = []
+            for contour in contours:
+                candidate = self._evaluate_candidate(
+                    contour,
+                    hsv,
+                    value_channel,
+                    frame_rgb.shape[:2],
+                    relaxed=relaxed,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+
+            targets = self._build_targets(candidates, frame_rgb.shape[:2], relaxed=relaxed)
+            stage_reports.append(
+                {
+                    "stage": stage_name,
+                    "raw_contours": len(contours),
+                    "candidate_count": len(candidates),
+                    "target_count": len(targets),
+                }
+            )
+
+            if targets:
+                self.debug_mask = mask
+                self.last_metrics = {
+                    "stage": stage_name,
+                    "target_count": len(targets),
+                    "targets": [target["metrics"] for target in targets],
+                }
+                self.debug_result = self._build_debug_result(frame_rgb, targets, candidates)
+                return DetectionResult(True, targets)
+
+            self.debug_mask = mask
+            self.debug_result = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
+
+        self.last_metrics = {
+            "reason": "no_valid_candidate",
+            "lower_hsv": lower_hsv.tolist(),
+            "upper_hsv": upper_hsv.tolist(),
+            "stages": stage_reports,
+        }
+        return DetectionResult(False, [])
+
+    def _create_mask(
+        self,
+        hsv: np.ndarray,
+        value_channel: np.ndarray,
+        lower_hsv: np.ndarray,
+        upper_hsv: np.ndarray,
+        relaxed: bool = False,
+    ) -> np.ndarray:
+        if relaxed:
+            lower = np.array(
+                [max(int(lower_hsv[0]) - 8, 0), max(int(lower_hsv[1]) - 40, 0), max(int(lower_hsv[2]) - 60, 0)],
+                dtype=np.uint8,
+            )
+            upper = np.array(
+                [min(int(upper_hsv[0]) + 8, 179), min(int(upper_hsv[1]) + 35, 255), 255],
+                dtype=np.uint8,
+            )
+        else:
+            lower = lower_hsv
+            upper = upper_hsv
+
+        green_mask = cv2.inRange(hsv, lower, upper)
         min_v = int(self.config.get("brightness", {}).get("min_v", 180))
+        if relaxed:
+            min_v = max(int(min_v * 0.6), 80)
         bright_mask = cv2.threshold(value_channel, min_v, 255, cv2.THRESH_BINARY)[1]
         mask = cv2.bitwise_and(green_mask, bright_mask)
-        mask = self._refine_mask(mask)
-        self.debug_mask = mask
+        return self._refine_mask(mask)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        candidates = []
-        for contour in contours:
-            candidate = self._evaluate_candidate(contour, hsv, value_channel, frame_rgb.shape[:2])
-            if candidate is not None:
-                candidates.append(candidate)
-
+    def _build_targets(
+        self,
+        candidates: list[dict[str, Any]],
+        frame_shape: tuple[int, int],
+        relaxed: bool = False,
+    ) -> list[dict[str, Any]]:
         if not candidates:
-            self.last_metrics = {
-                "candidate_count": len(contours),
-                "lower_hsv": lower_hsv.tolist(),
-                "upper_hsv": upper_hsv.tolist(),
-                "reason": "no_valid_candidate",
-            }
-            self.debug_result = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
-            return DetectionResult(False, [])
+            return []
 
         contour_config = self.config.get("contour", {})
         far_min_area = float(contour_config.get("far_min_area", contour_config.get("min_area", 60)))
         near_min_area = float(contour_config.get("near_min_area", 300))
+        if relaxed:
+            far_min_area = max(20.0, far_min_area * 0.5)
+            near_min_area = max(far_min_area, near_min_area * 0.6)
 
         near_candidates = []
         far_candidates = []
-        for candidate in sorted(candidates, key=lambda item: item["area"], reverse=True):
+        for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
             if candidate["area"] >= near_min_area:
                 near_candidates.append(candidate)
             elif candidate["area"] >= far_min_area:
                 far_candidates.append(candidate)
 
-        selected_candidates = []
+        selected_candidates: list[tuple[str, dict[str, Any]]] = []
         if near_candidates:
             selected_candidates.append(("near", near_candidates[0]))
         if far_candidates:
             selected_candidates.append(("far", far_candidates[0]))
 
-        if not selected_candidates:
-            self.last_metrics = {
-                "candidate_count": len(contours),
-                "reason": "no_candidate_matched_near_far_threshold",
-                "near_min_area": near_min_area,
-                "far_min_area": far_min_area,
-            }
-            self.debug_result = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
-            return DetectionResult(False, [])
+        # 宽松阶段兜底：只要有明显候选，就至少输出一个目标。
+        if not selected_candidates and relaxed:
+            selected_candidates.append(("near", sorted(candidates, key=lambda item: item["score"], reverse=True)[0]))
 
-        frame_h, frame_w = frame_rgb.shape[:2]
+        frame_h, frame_w = frame_shape
         center_x = frame_w // 2
         center_y = frame_h // 2
         targets: list[dict[str, Any]] = []
@@ -117,13 +174,7 @@ class GreenLightDetector:
                 "index": index,
             }
             targets.append(target)
-
-        self.last_metrics = {
-            "target_count": len(targets),
-            "targets": [target["metrics"] for target in targets],
-        }
-        self.debug_result = self._build_debug_result(frame_rgb, targets, candidates)
-        return DetectionResult(bool(targets), targets)
+        return targets
 
     def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
         morphology = self.config.get("morphology", {})
@@ -150,16 +201,38 @@ class GreenLightDetector:
         hsv: np.ndarray,
         value_channel: np.ndarray,
         frame_shape: tuple[int, int],
+        relaxed: bool = False,
     ) -> dict[str, Any] | None:
         contour_config = self.config.get("contour", {})
         brightness_config = self.config.get("brightness", {})
         circle_config = self.config.get("circle", {})
         scoring = self.config.get("scoring", {})
 
+        min_area = float(contour_config.get("min_area", 60))
+        max_area = float(contour_config.get("max_area", 20000))
+        min_circularity = float(contour_config.get("min_circularity", 0.55))
+        min_aspect_ratio = float(contour_config.get("min_aspect_ratio", 0.55))
+        min_fill_ratio = float(contour_config.get("min_fill_ratio", 0.55))
+        min_radius = float(circle_config.get("min_radius", 4))
+        max_radius = float(circle_config.get("max_radius", 120))
+        min_v_threshold = float(brightness_config.get("min_v", 180))
+        max_std_threshold = float(brightness_config.get("max_std", 90))
+
+        if relaxed:
+            min_area = max(20.0, min_area * 0.5)
+            max_area = max_area * 1.5
+            min_circularity = max(0.35, min_circularity - 0.15)
+            min_aspect_ratio = max(0.35, min_aspect_ratio - 0.15)
+            min_fill_ratio = max(0.35, min_fill_ratio - 0.15)
+            min_radius = max(2.0, min_radius - 2.0)
+            max_radius = max_radius * 1.5
+            min_v_threshold = max(80.0, min_v_threshold * 0.6)
+            max_std_threshold = max_std_threshold * 1.8
+
         area = float(cv2.contourArea(contour))
-        if area < float(contour_config.get("min_area", 60)):
+        if area < min_area:
             return None
-        if area > float(contour_config.get("max_area", 20000)):
+        if area > max_area:
             return None
 
         perimeter = cv2.arcLength(contour, True)
@@ -167,25 +240,23 @@ class GreenLightDetector:
             return None
 
         circularity = float(4.0 * np.pi * area / (perimeter * perimeter))
-        if circularity < float(contour_config.get("min_circularity", 0.55)):
+        if circularity < min_circularity:
             return None
 
         x, y, w, h = cv2.boundingRect(contour)
         if w <= 0 or h <= 0:
             return None
         aspect_ratio = float(min(w, h) / max(w, h))
-        if aspect_ratio < float(contour_config.get("min_aspect_ratio", 0.55)):
+        if aspect_ratio < min_aspect_ratio:
             return None
 
         (circle_x, circle_y), radius = cv2.minEnclosingCircle(contour)
-        min_radius = float(circle_config.get("min_radius", 4))
-        max_radius = float(circle_config.get("max_radius", 120))
         if radius < min_radius or radius > max_radius:
             return None
 
         enclosing_area = np.pi * radius * radius
         fill_ratio = float(area / enclosing_area) if enclosing_area > 0 else 0.0
-        if fill_ratio < float(contour_config.get("min_fill_ratio", 0.55)):
+        if fill_ratio < min_fill_ratio:
             return None
 
         contour_mask = np.zeros(value_channel.shape, dtype=np.uint8)
@@ -197,9 +268,9 @@ class GreenLightDetector:
 
         mean_brightness = float(np.mean(contour_values))
         brightness_std = float(np.std(contour_values))
-        if mean_brightness < float(brightness_config.get("min_v", 180)):
+        if mean_brightness < min_v_threshold:
             return None
-        if brightness_std > float(brightness_config.get("max_std", 90)):
+        if brightness_std > max_std_threshold:
             return None
 
         mean_h = float(np.mean(contour_hsv[:, 0]))

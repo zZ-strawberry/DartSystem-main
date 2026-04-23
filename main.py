@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import atexit
 import copy
+from pathlib import Path
+import signal
 import struct
 import sys
 import time
@@ -121,6 +123,71 @@ class SerialCommunication(QObject):
             print(f"串口已关闭: {self.port}")
 
 
+class TuningWindow(QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowTitle("DartSystem 实时调参")
+        self.resize(460, 980)
+
+        main_widget = QWidget(self)
+        self.setCentralWidget(main_widget)
+        root_layout = QVBoxLayout()
+
+        self.live_tuning_checkbox = QCheckBox("启用实时调参")
+        root_layout.addWidget(self.live_tuning_checkbox)
+
+        self.save_tuning_button = QPushButton("保存当前实时参数到配置")
+        root_layout.addWidget(self.save_tuning_button)
+
+        self.tuning_group = QGroupBox("实时调参")
+        tuning_form = QFormLayout()
+        self.tuning_group.setLayout(tuning_form)
+        root_layout.addWidget(self.tuning_group)
+
+        self.tuning_controls = {
+            "h_min": self.add_spin(tuning_form, "H Min", 0, 179),
+            "h_max": self.add_spin(tuning_form, "H Max", 0, 179),
+            "s_min": self.add_spin(tuning_form, "S Min", 0, 255),
+            "s_max": self.add_spin(tuning_form, "S Max", 0, 255),
+            "v_min": self.add_spin(tuning_form, "V Min", 0, 255),
+            "v_max": self.add_spin(tuning_form, "V Max", 0, 255),
+            "brightness_min_v": self.add_spin(tuning_form, "亮度下限", 0, 255),
+            "brightness_max_std": self.add_spin(tuning_form, "亮度方差上限", 0, 255),
+            "min_area": self.add_spin(tuning_form, "最小面积", 0, 100000),
+            "max_area": self.add_spin(tuning_form, "最大面积", 1, 100000),
+            "far_min_area": self.add_spin(tuning_form, "远目标最小面积", 0, 100000),
+            "near_min_area": self.add_spin(tuning_form, "近目标最小面积", 0, 100000),
+            "min_radius": self.add_spin(tuning_form, "最小半径", 0, 1000),
+            "max_radius": self.add_spin(tuning_form, "最大半径", 1, 1000),
+            "blur_kernel": self.add_spin(tuning_form, "模糊核", 1, 31, step=2),
+            "open_kernel": self.add_spin(tuning_form, "开运算核", 1, 31, step=2),
+            "close_kernel": self.add_spin(tuning_form, "闭运算核", 1, 31, step=2),
+            "min_circularity": self.add_double_spin(tuning_form, "最小圆度", 0.0, 1.0, 0.01),
+            "min_fill_ratio": self.add_double_spin(tuning_form, "最小填充率", 0.0, 1.0, 0.01),
+            "min_aspect_ratio": self.add_double_spin(tuning_form, "最小长宽比", 0.0, 1.0, 0.01),
+        }
+
+        main_widget.setLayout(root_layout)
+
+    @staticmethod
+    def add_spin(layout, label, minimum, maximum, step=1):
+        control = QSpinBox()
+        control.setRange(minimum, maximum)
+        control.setSingleStep(step)
+        layout.addRow(label, control)
+        return control
+
+    @staticmethod
+    def add_double_spin(layout, label, minimum, maximum, step):
+        control = QDoubleSpinBox()
+        control.setRange(minimum, maximum)
+        control.setSingleStep(step)
+        control.setDecimals(2)
+        layout.addRow(label, control)
+        return control
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -145,6 +212,9 @@ class MainWindow(QMainWindow):
         self.processed_frame_count = 0
         self.live_tuning_enabled = False
         self.tuning_controls: dict[str, object] = {}
+        self.tuning_window: TuningWindow | None = None
+        self.ui_config: dict[str, object] = {}
+        self._shutdown_done = False
 
         self.video_timer = QTimer(self)
         self.video_timer.timeout.connect(self.process_video_frame)
@@ -154,6 +224,7 @@ class MainWindow(QMainWindow):
         self.reconnect_timer.timeout.connect(self.refresh_connection)
 
         self.init_ui()
+        self.init_tuning_window()
         self.apply_runtime_config(self.config, reconnect_serial=False)
         self.setup_serial()
         self.frame_timer.start(30)
@@ -203,22 +274,6 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.reload_config_button)
         root_layout.addLayout(button_layout)
 
-        self.live_tuning_checkbox = QCheckBox("启用实时调参")
-        self.live_tuning_checkbox.toggled.connect(self.on_live_tuning_toggled)
-        root_layout.addWidget(self.live_tuning_checkbox)
-
-        self.save_tuning_button = QPushButton("保存当前实时参数到配置")
-        self.save_tuning_button.clicked.connect(self.save_current_tuning_to_config)
-        self.save_tuning_button.setEnabled(False)
-        root_layout.addWidget(self.save_tuning_button)
-
-        tuning_row = QHBoxLayout()
-        self.tuning_group = QGroupBox("实时调参")
-        tuning_form = QFormLayout()
-        self.tuning_group.setLayout(tuning_form)
-        tuning_row.addWidget(self.tuning_group)
-        root_layout.addLayout(tuning_row)
-
         self.video_slider = QSlider(Qt.Orientation.Horizontal)
         self.video_slider.setEnabled(False)
         self.video_slider.valueChanged.connect(self.on_video_slider_changed)
@@ -243,53 +298,26 @@ class MainWindow(QMainWindow):
             root_layout.addWidget(label)
 
         main_widget.setLayout(root_layout)
-        self.init_tuning_controls()
-        self.set_tuning_controls_enabled(False)
 
-    def init_tuning_controls(self) -> None:
-        layout = self.tuning_group.layout()
-        self.tuning_controls = {
-            "h_min": self.add_spin(layout, "H Min", 0, 179),
-            "h_max": self.add_spin(layout, "H Max", 0, 179),
-            "s_min": self.add_spin(layout, "S Min", 0, 255),
-            "s_max": self.add_spin(layout, "S Max", 0, 255),
-            "v_min": self.add_spin(layout, "V Min", 0, 255),
-            "v_max": self.add_spin(layout, "V Max", 0, 255),
-            "brightness_min_v": self.add_spin(layout, "亮度下限", 0, 255),
-            "brightness_max_std": self.add_spin(layout, "亮度方差上限", 0, 255),
-            "min_area": self.add_spin(layout, "最小面积", 0, 100000),
-            "max_area": self.add_spin(layout, "最大面积", 1, 100000),
-            "far_min_area": self.add_spin(layout, "远目标最小面积", 0, 100000),
-            "near_min_area": self.add_spin(layout, "近目标最小面积", 0, 100000),
-            "min_radius": self.add_spin(layout, "最小半径", 0, 1000),
-            "max_radius": self.add_spin(layout, "最大半径", 1, 1000),
-            "blur_kernel": self.add_spin(layout, "模糊核", 1, 31, step=2),
-            "open_kernel": self.add_spin(layout, "开运算核", 1, 31, step=2),
-            "close_kernel": self.add_spin(layout, "闭运算核", 1, 31, step=2),
-            "min_circularity": self.add_double_spin(layout, "最小圆度", 0.0, 1.0, 0.01),
-            "min_fill_ratio": self.add_double_spin(layout, "最小填充率", 0.0, 1.0, 0.01),
-            "min_aspect_ratio": self.add_double_spin(layout, "最小长宽比", 0.0, 1.0, 0.01),
-        }
+    def init_tuning_window(self) -> None:
+        self.tuning_window = TuningWindow(self)
+        self.tuning_controls = self.tuning_window.tuning_controls
+        self.live_tuning_checkbox = self.tuning_window.live_tuning_checkbox
+        self.save_tuning_button = self.tuning_window.save_tuning_button
+
+        self.live_tuning_checkbox.toggled.connect(self.on_live_tuning_toggled)
+        self.save_tuning_button.clicked.connect(self.save_current_tuning_to_config)
+        self.save_tuning_button.setEnabled(False)
+
         for control in self.tuning_controls.values():
             control.valueChanged.connect(self.on_tuning_value_changed)
 
-    def add_spin(self, layout, label, minimum, maximum, step=1):
-        control = QSpinBox()
-        control.setRange(minimum, maximum)
-        control.setSingleStep(step)
-        layout.addRow(label, control)
-        return control
-
-    def add_double_spin(self, layout, label, minimum, maximum, step):
-        control = QDoubleSpinBox()
-        control.setRange(minimum, maximum)
-        control.setSingleStep(step)
-        control.setDecimals(2)
-        layout.addRow(label, control)
-        return control
+        self.set_tuning_controls_enabled(False)
 
     def set_tuning_controls_enabled(self, enabled: bool) -> None:
-        self.tuning_group.setEnabled(enabled)
+        if self.tuning_window is None:
+            return
+        self.tuning_window.tuning_group.setEnabled(enabled)
         for control in self.tuning_controls.values():
             control.setEnabled(enabled)
 
@@ -301,7 +329,10 @@ class MainWindow(QMainWindow):
         self.recording_config = config.get("recording", {})
         self.runtime_config = config.get("runtime", {})
         self.test_config = config.get("test", {})
+        self.ui_config = config.get("ui", {})
         self.debug_config = self.detection_config.get("debug", {})
+
+        self.apply_ui_window_visibility()
 
         self.sync_tuning_controls_from_config()
         if self.live_tuning_enabled:
@@ -325,6 +356,30 @@ class MainWindow(QMainWindow):
             self.apply_camera_parameters()
         if reconnect_serial and self.serial_config.get("enabled", False):
             self.setup_serial()
+
+    def apply_ui_window_visibility(self) -> None:
+        display_enabled = bool(self.ui_config.get("enable_display_window", True))
+        tuning_enabled = bool(self.ui_config.get("enable_tuning_window", True))
+
+        if not display_enabled and not tuning_enabled:
+            display_enabled = True
+            print("ui 配置中两个窗口都关闭，已自动保留主画面窗口。")
+
+        if display_enabled:
+            self.show()
+        else:
+            self.hide()
+
+        if self.tuning_window is not None:
+            if tuning_enabled:
+                self.tuning_window.show()
+            else:
+                self.tuning_window.hide()
+                if self.live_tuning_enabled:
+                    self.live_tuning_checkbox.blockSignals(True)
+                    self.live_tuning_checkbox.setChecked(False)
+                    self.live_tuning_checkbox.blockSignals(False)
+                    self.on_live_tuning_toggled(False)
 
     def startup_by_runtime_mode(self) -> None:
         mode = str(self.runtime_config.get("mode", "hik")).lower()
@@ -617,6 +672,58 @@ class MainWindow(QMainWindow):
             return
         self.setup_serial()
 
+    def _convert_raw_frame_to_rgb(
+        self,
+        frame_data: np.ndarray,
+        width: int,
+        height: int,
+        pixel_type: int,
+    ) -> np.ndarray | None:
+        mono_size = width * height
+        if width <= 0 or height <= 0 or frame_data.size < mono_size:
+            return None
+
+        if pixel_type == 17301505:  # Mono8
+            gray = frame_data[:mono_size].reshape((height, width))
+            return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+
+        bayer_to_rgb = {
+            17301513: cv2.COLOR_BAYER_GB2RGB,  # BayerGB8
+            17301514: cv2.COLOR_BAYER_RG2RGB,  # BayerRG8
+            17301515: cv2.COLOR_BAYER_GR2RGB,  # BayerGR8
+            17301516: cv2.COLOR_BAYER_BG2RGB,  # BayerBG8
+        }
+        if pixel_type in bayer_to_rgb:
+            raw = frame_data[:mono_size].reshape((height, width))
+            return cv2.cvtColor(raw, bayer_to_rgb[pixel_type])
+
+        if pixel_type == 35127316:  # RGB8 Packed
+            rgb_size = mono_size * 3
+            if frame_data.size < rgb_size:
+                return None
+            return frame_data[:rgb_size].reshape((height, width, 3))
+
+        if pixel_type == 35127317:  # BGR8 Packed
+            bgr_size = mono_size * 3
+            if frame_data.size < bgr_size:
+                return None
+            bgr = frame_data[:bgr_size].reshape((height, width, 3))
+            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+        if pixel_type == 34603039:  # YUV422
+            yuv_size = mono_size * 2
+            if frame_data.size < yuv_size:
+                return None
+            yuv = frame_data[:yuv_size].reshape((height, width, 2))
+            return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_Y422)
+
+        # 兜底：未知单通道格式按 BayerBG 尝试，再回退灰度。
+        raw = frame_data[:mono_size].reshape((height, width))
+        try:
+            return cv2.cvtColor(raw, cv2.COLOR_BAYER_BG2RGB)
+        except cv2.error:
+            return cv2.cvtColor(raw, cv2.COLOR_GRAY2RGB)
+
     def read_frame(self) -> tuple[bool, np.ndarray | None]:
         if self.camera is None or self.p_data is None or self.st_frame_info is None:
             return False, None
@@ -625,19 +732,15 @@ class MainWindow(QMainWindow):
         if ret != 0:
             return False, None
 
-        frame_data = np.frombuffer(self.p_data, dtype=np.uint8)
-        frame = frame_data.reshape((self.st_frame_info.nHeight, self.st_frame_info.nWidth))
+        frame_len = int(getattr(self.st_frame_info, "nFrameLen", 0) or self.data_size)
+        frame_data = np.frombuffer(self.p_data, dtype=np.uint8, count=frame_len)
+        height = int(self.st_frame_info.nHeight)
+        width = int(self.st_frame_info.nWidth)
         pixel_type = self.st_frame_info.enPixelType
-
-        if pixel_type == 17301505:
-            image_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        else:
-            try:
-                image_bgr = cv2.cvtColor(frame, cv2.COLOR_BAYER_BG2BGR)
-            except cv2.error:
-                image_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-
-        return True, cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        image_rgb = self._convert_raw_frame_to_rgb(frame_data, width, height, pixel_type)
+        if image_rgb is None:
+            return False, None
+        return True, image_rgb
 
     def update_camera_frame(self) -> None:
         if self.is_video_mode:
@@ -664,27 +767,18 @@ class MainWindow(QMainWindow):
     def process_frame(self, frame_rgb: np.ndarray, source_name: str, fps: float | None = None) -> None:
         self.processed_frame_count += 1
         targets = detect_green_targets(frame_rgb)
-        found = bool(targets)
-        near_target = targets[0] if len(targets) > 0 else None
-        far_target = targets[1] if len(targets) > 1 else None
 
         if source_name == "camera":
             self.send_detection_result(targets)
 
+        # 左侧显示原图叠加检测信息，右侧显示掩膜图。
         result_image = self.draw_detection_overlay(
             frame_rgb,
             source_name=source_name,
             fps=fps,
             targets=targets,
         )
-        mask_image, debug_result = get_debug_images()
-        if debug_result is not None:
-            result_image = self.draw_detection_overlay(
-                debug_result.copy(),
-                source_name=source_name,
-                fps=fps,
-                targets=targets,
-            )
+        mask_image, _ = get_debug_images()
 
         mask_vis = np.zeros_like(frame_rgb) if mask_image is None else cv2.cvtColor(mask_image, cv2.COLOR_GRAY2RGB)
         self.set_label_image(self.camera_label, result_image)
@@ -737,15 +831,6 @@ class MainWindow(QMainWindow):
         cv2.circle(result, center, 8, center_color, 2)
         cv2.line(result, (center[0] - 14, center[1]), (center[0] + 14, center[1]), center_color, 2)
         cv2.line(result, (center[0], center[1] - 14), (center[0], center[1] + 14), center_color, 2)
-        cv2.putText(
-            result,
-            "CENTER",
-            (center[0] + 10, max(24, center[1] - 12)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            center_color,
-            2,
-        )
 
         found = bool(targets)
         lines = [
@@ -771,7 +856,7 @@ class MainWindow(QMainWindow):
             text_y += 28
 
         colors = {"near": (0, 255, 0), "far": (255, 165, 0)}
-        line_colors = {"near": (0, 255, 255), "far": (255, 220, 120)}
+        line_colors = {"near": (255, 0, 0), "far": (255, 0, 0)}
         for target in targets:
             x, y, w, h = target["bbox"]
             target_center = target["center"]
@@ -941,6 +1026,14 @@ class MainWindow(QMainWindow):
         print("已切换回相机模式")
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.shutdown()
+        event.accept()
+
+    def shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
         self.frame_timer.stop()
         self.video_timer.stop()
         self.reconnect_timer.stop()
@@ -953,8 +1046,11 @@ class MainWindow(QMainWindow):
             self.camera.MV_CC_CloseDevice()
             self.camera.MV_CC_DestroyHandle()
             self.camera = None
+
+        if self.tuning_window is not None:
+            self.tuning_window.hide()
+
         stop_system_recording()
-        event.accept()
 
 
 def main() -> None:
@@ -973,10 +1069,27 @@ def main() -> None:
 
     atexit.register(stop_system_recording)
     app = QApplication(sys.argv)
+
+    # 让 Ctrl+C 能在 Qt 事件循环中被可靠处理。
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    sig_timer = QTimer()
+    sig_timer.start(200)
+    sig_timer.timeout.connect(lambda: None)
+
     window = MainWindow(config_path)
     window.startup_by_runtime_mode()
-    window.show()
-    sys.exit(app.exec())
+    app.aboutToQuit.connect(window.shutdown)
+    exit_code = 0
+    try:
+        exit_code = app.exec()
+    except KeyboardInterrupt:
+        print("收到 Ctrl+C，正在退出...")
+        exit_code = 0
+    finally:
+        window.shutdown()
+        stop_system_recording()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

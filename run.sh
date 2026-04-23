@@ -1,10 +1,8 @@
-#!/bin/bash
-# DartSystem 启动脚本
-
+#!/usr/bin/env bash
 cd "$(dirname "$0")"
-export DISPLAY=:1
-export LD_LIBRARY_PATH=/opt/MVS/lib/64:$LD_LIBRARY_PATH
 
-source ~/anaconda3/etc/profile.d/conda.sh
-conda activate dart
-python main.py
+if [[ -x .venv/bin/python ]]; then
+	exec .venv/bin/python main.py
+fi
+
+exec python3 main.py

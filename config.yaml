@@ -1,12 +1,14 @@
-# 运行模式
-# mode: hik 使用海康相机实时检测
-# mode: test 使用测试文件，不接相机也能调试
 runtime:
-  mode: "hik"
+  mode: "test"  #test或hik
 
-# test 模式下的测试源设置
+# UI 窗口开关
+# enable_display_window: 是否显示主画面窗口（原图/掩膜/状态）
+# enable_tuning_window: 是否显示实时调参窗口
+ui:
+  enable_display_window: true
+  enable_tuning_window: true
+
 # source: video 或 image
-# path: 测试文件路径，支持相对路径和绝对路径
 # auto_start: true 时程序启动后自动加载测试文件
 test:
   source: "video"
@@ -56,7 +58,7 @@ detection:
     dilate_iterations: 1
   contour:
     min_area: 60
-    max_area: 20000
+    max_area: 70000
     far_min_area: 60
     near_min_area: 300
     min_circularity: 0.55
@@ -64,7 +66,7 @@ detection:
     min_fill_ratio: 0.55
   circle:
     min_radius: 4
-    max_radius: 120
+    max_radius: 500
   scoring:
     brightness_weight: 1.4
     circularity_weight: 1.2

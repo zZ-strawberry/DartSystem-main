@@ -41,6 +41,10 @@ DEFAULT_CONFIG = {
     "runtime": {
         "mode": "hik",
     },
+    "ui": {
+        "enable_display_window": True,
+        "enable_tuning_window": True,
+    },
     "test": {
         "source": "video",
         "path": "",
@@ -153,6 +157,7 @@ def _yaml_scalar(value) -> str:
 
 def render_config_with_comments(config: dict) -> str:
     runtime = config.get("runtime", {})
+    ui = config.get("ui", {})
     test = config.get("test", {})
     camera = config.get("camera", {})
     serial = config.get("serial", {})
@@ -173,6 +178,13 @@ def render_config_with_comments(config: dict) -> str:
         "# mode: test 使用测试文件，不接相机也能调试",
         "runtime:",
         f"  mode: \"{runtime.get('mode', 'hik')}\"",
+        "",
+        "# UI 窗口开关",
+        "# enable_display_window: 是否显示主画面窗口（原图/掩膜/状态）",
+        "# enable_tuning_window: 是否显示实时调参窗口",
+        "ui:",
+        f"  enable_display_window: {str(bool(ui.get('enable_display_window', True))).lower()}",
+        f"  enable_tuning_window: {str(bool(ui.get('enable_tuning_window', True))).lower()}",
         "",
         "# test 模式下的测试源设置",
         "# source: video 或 image",
