@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import glob
 import sys
 from pathlib import Path
 
@@ -24,17 +23,8 @@ def mv_sdk_python_path() -> Path:
     return PROJECT_ROOT / ("MvImport" if IS_WINDOWS else "MvImport_Linux")
 
 
-def platform_default_serial_ports() -> list[str]:
-    if IS_WINDOWS:
-        return ["COM3", "COM4", "COM5"]
-    return [
-        "/dev/serial/by-id/*",
-        "/dev/ttyACM0",
-        "/dev/ttyACM1",
-        "/dev/ttyUSB0",
-        "/dev/ttyUSB1",
-        "/dev/my_stm32",
-    ]
+def platform_default_can_interface() -> str:
+    return "can0"
 
 
 DEFAULT_CONFIG = {
@@ -54,11 +44,20 @@ DEFAULT_CONFIG = {
         "exposure": 16000.0,
         "gain": 15.9,
     },
-    "serial": {
+    "can": {
         "enabled": False,
-        "primary_port": platform_default_serial_ports()[0],
-        "baudrate": 115200,
-        "backup_ports": platform_default_serial_ports()[1:],
+        "driver": "dameow",
+        "interface": platform_default_can_interface(),
+        "selector": "0",
+        "tx_id": 0x123,
+        "extended_id": False,
+        "bus_mode": "canfd",
+        "bitrate": 500000,
+        "data_bitrate": 2000000,
+        "bitrate_switch": True,
+        "channel": 0,
+        "device_type": 0,
+        "bridge_library": "",
         "reconnect_interval_ms": 5000,
         "send_every_n_frames": 1,
     },
@@ -135,7 +134,20 @@ def load_config(config_path: str | Path | None = None) -> dict:
     if not isinstance(loaded, dict):
         raise ValueError(f"配置文件格式无效: {config_file}")
 
-    return _deep_merge(DEFAULT_CONFIG, loaded)
+    merged = _deep_merge(DEFAULT_CONFIG, loaded)
+
+    if "can" not in loaded and isinstance(loaded.get("serial"), dict):
+        legacy_serial = loaded["serial"]
+        merged["can"] = _deep_merge(
+            DEFAULT_CONFIG["can"],
+            {
+                "enabled": bool(legacy_serial.get("enabled", False)),
+                "reconnect_interval_ms": int(legacy_serial.get("reconnect_interval_ms", 5000)),
+                "send_every_n_frames": int(legacy_serial.get("send_every_n_frames", 1)),
+            },
+        )
+
+    return merged
 
 
 def save_config(config: dict, config_path: str | Path | None = None) -> Path:
@@ -155,12 +167,23 @@ def _yaml_scalar(value) -> str:
     return str(value)
 
 
+def _coerce_int(value, default: int) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            return default
+    return default
+
+
 def render_config_with_comments(config: dict) -> str:
     runtime = config.get("runtime", {})
     ui = config.get("ui", {})
     test = config.get("test", {})
     camera = config.get("camera", {})
-    serial = config.get("serial", {})
+    can = config.get("can", {})
     detection = config.get("detection", {})
     hsv = detection.get("hsv", {})
     brightness = detection.get("brightness", {})
@@ -170,7 +193,6 @@ def render_config_with_comments(config: dict) -> str:
     scoring = detection.get("scoring", {})
     debug = detection.get("debug", {})
     recording = config.get("recording", {})
-    backup_ports = serial.get("backup_ports", [])
 
     lines = [
         "# 运行模式",
@@ -200,19 +222,33 @@ def render_config_with_comments(config: dict) -> str:
         f"  exposure: {float(camera.get('exposure', 16000.0))}",
         f"  gain: {float(camera.get('gain', 15.9))}",
         "",
-        "# 串口通信参数",
-        "serial:",
-        f"  enabled: {str(bool(serial.get('enabled', False))).lower()}",
-        f"  primary_port: \"{serial.get('primary_port', platform_default_serial_ports()[0])}\"",
-        f"  baudrate: {int(serial.get('baudrate', 115200))}",
-        f"  reconnect_interval_ms: {int(serial.get('reconnect_interval_ms', 5000))}",
-        f"  send_every_n_frames: {int(serial.get('send_every_n_frames', 1))}",
-        "  backup_ports:",
+        "# CAN 通信参数",
+        "# driver: socketcan 或 dameow",
+        "# interface: SocketCAN 接口名，如 can0；仅对 socketcan 生效",
+        "# selector: dameow 设备选择器，可填设备索引/SN/别名",
+        "# tx_id: 发送到下位机的 CAN ID，建议使用十六进制字符串",
+        "# bus_mode: can 或 canfd；当前 33 字节 payload 想保持不变时，应使用 canfd",
+        "# bitrate/data_bitrate: 对 dameow 会传给 drv_ws；对 socketcan 仅作为记录，接口需预先配置并拉起",
+        "# channel/device_type: dameow 通道与设备类型，device_type 默认 0=DEV_USB2CANFD",
+        "# bridge_library: drv_ws bridge 动态库路径，留空则自动搜索 drv_ws_bridge/build/libdrv_ws_bridge.so",
+        "# bitrate_switch: CAN FD 是否启用 BRS",
+        "can:",
+        f"  enabled: {str(bool(can.get('enabled', False))).lower()}",
+        f"  driver: \"{can.get('driver', 'dameow')}\"",
+        f"  interface: \"{can.get('interface', platform_default_can_interface())}\"",
+        f"  selector: \"{can.get('selector', '0')}\"",
+        f"  tx_id: \"0x{_coerce_int(can.get('tx_id', 0x123), 0x123):03X}\"",
+        f"  extended_id: {str(bool(can.get('extended_id', False))).lower()}",
+        f"  bus_mode: \"{can.get('bus_mode', 'canfd')}\"",
+        f"  bitrate: {int(can.get('bitrate', 500000))}",
+        f"  data_bitrate: {int(can.get('data_bitrate', 2000000))}",
+        f"  bitrate_switch: {str(bool(can.get('bitrate_switch', True))).lower()}",
+        f"  channel: {int(can.get('channel', 0))}",
+        f"  device_type: {int(can.get('device_type', 0))}",
+        f"  bridge_library: \"{can.get('bridge_library', '')}\"",
+        f"  reconnect_interval_ms: {int(can.get('reconnect_interval_ms', 5000))}",
+        f"  send_every_n_frames: {int(can.get('send_every_n_frames', 1))}",
     ]
-    for port in backup_ports:
-        lines.append(f"    - \"{port}\"")
-    if not backup_ports:
-        lines.append("    - \"\"")
 
     lines.extend(
         [
@@ -273,42 +309,3 @@ def render_config_with_comments(config: dict) -> str:
     )
     return "\n".join(lines)
 
-
-def _expand_port_candidate(candidate: str) -> list[str]:
-    if "*" in candidate or "?" in candidate:
-        return sorted(glob.glob(candidate))
-    return [candidate]
-
-
-def discover_serial_ports(configured_ports: list[str] | None = None) -> list[str]:
-    candidates: list[str] = []
-
-    for port in configured_ports or []:
-        if port:
-            candidates.extend(_expand_port_candidate(port))
-
-    try:
-        from serial.tools import list_ports
-
-        discovered = sorted(
-            (port.device for port in list_ports.comports() if port.device),
-            key=str,
-        )
-        candidates.extend(discovered)
-    except Exception:
-        pass
-
-    if IS_LINUX:
-        for pattern in ["/dev/serial/by-id/*", "/dev/ttyACM*", "/dev/ttyUSB*"]:
-            candidates.extend(sorted(glob.glob(pattern)))
-    elif IS_WINDOWS:
-        candidates.extend(f"COM{i}" for i in range(1, 21))
-
-    unique: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            unique.append(candidate)
-
-    return unique

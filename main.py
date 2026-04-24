@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import atexit
 import copy
+import ctypes
 from pathlib import Path
 import signal
+import socket
 import struct
 import sys
 import time
@@ -11,7 +13,6 @@ from ctypes import POINTER, byref, c_ubyte, cast, memset, sizeof
 
 import cv2
 import numpy as np
-import serial
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -31,7 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app_config import PROJECT_ROOT, discover_serial_ports, load_config, mv_sdk_python_path, save_config
+from app_config import PROJECT_ROOT, load_config, mv_sdk_python_path, save_config
 from opencv_green_detection import detect_green_targets, get_debug_images, set_detection_config
 from system_recorder import start_system_recording, stop_system_recording
 
@@ -79,48 +80,291 @@ def crc16_ccitt(data: bytes, initial: int = 0xFFFF) -> int:
     return crc
 
 
-class SerialCommunication(QObject):
+class CanCommunication(QObject):
     connection_status = pyqtSignal(bool)
 
-    def __init__(self, port: str, baudrate: int = 115200):
+    def __init__(
+        self,
+        interface_name: str,
+        tx_id: int,
+        bus_mode: str = "canfd",
+        bitrate_switch: bool = True,
+        extended_id: bool = False,
+    ):
         super().__init__()
-        self.port = port
-        self.baudrate = baudrate
-        self.serial = None
-        self.connect_serial()
+        self.driver_name = "socketcan"
+        self.interface_name = interface_name
+        self.connection_name = interface_name
+        self.tx_id = tx_id
+        self.bus_mode = str(bus_mode).lower()
+        self.bitrate_switch = bool(bitrate_switch)
+        self.extended_id = bool(extended_id)
+        self.sock: socket.socket | None = None
+        self.last_error = ""
+        self.connect_can()
 
-    def connect_serial(self) -> bool:
-        try:
-            if self.serial is None or not self.serial.is_open:
-                self.serial = serial.Serial(self.port, self.baudrate, timeout=0.1)
-            self.connection_status.emit(True)
-            print(f"串口已连接: {self.port}")
-            return True
-        except serial.SerialException as exc:
-            self.serial = None
+    def connect_can(self) -> bool:
+        if not sys.platform.startswith("linux"):
+            self.last_error = "当前仅支持 Linux 下的 SocketCAN。"
             self.connection_status.emit(False)
-            print(f"串口连接失败 {self.port}: {exc}")
+            print(self.last_error)
+            return False
+        if not hasattr(socket, "AF_CAN"):
+            self.last_error = "当前 Python 不支持 AF_CAN。"
+            self.connection_status.emit(False)
+            print(self.last_error)
+            return False
+        try:
+            sock = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+            if self.bus_mode == "canfd":
+                sol_can_raw = getattr(socket, "SOL_CAN_RAW", 101)
+                can_raw_fd_frames = getattr(socket, "CAN_RAW_FD_FRAMES", 5)
+                sock.setsockopt(sol_can_raw, can_raw_fd_frames, 1)
+            sock.bind((self.interface_name,))
+            self.sock = sock
+            self.last_error = ""
+            self.connection_status.emit(True)
+            print(f"CAN 已连接: {self.interface_name} tx_id=0x{self.tx_id:X} mode={self.bus_mode}")
+            return True
+        except OSError as exc:
+            self.sock = None
+            self.last_error = str(exc)
+            self.connection_status.emit(False)
+            print(f"CAN 连接失败 {self.interface_name}: {exc}")
             return False
 
     def is_connected(self) -> bool:
-        return self.serial is not None and self.serial.is_open
+        return self.sock is not None
 
     def send_frame(self, payload: bytes) -> bool:
         if not self.is_connected():
             return False
+
+        if self.bus_mode == "canfd":
+            if len(payload) > 64:
+                self.last_error = f"CAN FD 单帧最多 64 字节，当前 payload 为 {len(payload)} 字节。"
+                print(self.last_error)
+                return False
+            flags = 0x01 if self.bitrate_switch else 0x00
+            can_id = self.tx_id | (0x80000000 if self.extended_id else 0)
+            frame = struct.pack("=IBB2x64s", can_id, len(payload), flags, payload.ljust(64, b"\x00"))
+        else:
+            if len(payload) > 8:
+                self.last_error = (
+                    f"Classic CAN 单帧最多 8 字节，当前 payload 为 {len(payload)} 字节。"
+                    " 若不改发送内容，请将 can.bus_mode 设为 canfd。"
+                )
+                print(self.last_error)
+                return False
+            can_id = self.tx_id | (0x80000000 if self.extended_id else 0)
+            frame = struct.pack("=IB3x8s", can_id, len(payload), payload.ljust(8, b"\x00"))
+
         try:
-            self.serial.write(payload)
+            assert self.sock is not None
+            self.sock.send(frame)
             return True
-        except serial.SerialException as exc:
-            print(f"串口发送失败: {exc}")
+        except OSError as exc:
+            self.last_error = str(exc)
+            print(f"CAN 发送失败: {exc}")
             self.close()
             self.connection_status.emit(False)
             return False
 
     def close(self) -> None:
-        if self.serial is not None and self.serial.is_open:
-            self.serial.close()
-            print(f"串口已关闭: {self.port}")
+        if self.sock is not None:
+            self.sock.close()
+            self.sock = None
+            print(f"CAN 已关闭: {self.interface_name}")
+
+
+class DrvWsCanCommunication(QObject):
+    connection_status = pyqtSignal(bool)
+
+    def __init__(
+        self,
+        driver_name: str,
+        selector: str,
+        tx_id: int,
+        bus_mode: str,
+        bitrate_switch: bool,
+        extended_id: bool,
+        bitrate: int,
+        data_bitrate: int,
+        device_type: int,
+        channel: int,
+        bridge_library: str = "",
+    ):
+        super().__init__()
+        self.driver_name = driver_name
+        self.selector = selector
+        self.connection_name = selector
+        self.tx_id = tx_id
+        self.bus_mode = str(bus_mode).lower()
+        self.bitrate_switch = bool(bitrate_switch)
+        self.extended_id = bool(extended_id)
+        self.bitrate = int(bitrate)
+        self.data_bitrate = int(data_bitrate)
+        self.device_type = int(device_type)
+        self.channel = int(channel)
+        self.bridge_library = bridge_library
+        self.handle: ctypes.c_void_p | None = None
+        self._lib = None
+        self.last_error = ""
+        self.connect_can()
+
+    @staticmethod
+    def _resolve_library_path(configured_path: str) -> Path | None:
+        candidates: list[Path] = []
+        if configured_path:
+            candidates.append(Path(configured_path))
+
+        build_root = PROJECT_ROOT / "drv_ws_bridge" / "build"
+        candidates.extend(
+            [
+                build_root / "libdrv_ws_bridge.so",
+                build_root / "Release" / "libdrv_ws_bridge.so",
+                build_root / "Debug" / "libdrv_ws_bridge.so",
+            ]
+        )
+        if build_root.exists():
+            candidates.extend(sorted(build_root.rglob("libdrv_ws_bridge.so")))
+
+        seen: set[Path] = set()
+        for candidate in candidates:
+            resolved = candidate if candidate.is_absolute() else (PROJECT_ROOT / candidate).resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved.exists():
+                return resolved
+        return None
+
+    def _load_library(self) -> bool:
+        path = self._resolve_library_path(self.bridge_library)
+        if path is None:
+            self.last_error = "未找到 drv_ws bridge 库，请先编译 drv_ws_bridge/libdrv_ws_bridge.so"
+            return False
+        try:
+            lib = ctypes.CDLL(str(path))
+        except OSError as exc:
+            self.last_error = f"加载 bridge 库失败: {exc}"
+            return False
+
+        lib.drv_ws_open.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint8,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        lib.drv_ws_open.restype = ctypes.c_void_p
+        lib.drv_ws_send.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint8,
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        lib.drv_ws_send.restype = ctypes.c_int
+        lib.drv_ws_close.argtypes = [ctypes.c_void_p]
+        lib.drv_ws_close.restype = None
+        self._lib = lib
+        return True
+
+    def connect_can(self) -> bool:
+        if not sys.platform.startswith("linux"):
+            self.last_error = "drv_ws bridge 当前仅支持 Linux。"
+            self.connection_status.emit(False)
+            print(self.last_error)
+            return False
+        if not self._load_library():
+            self.connection_status.emit(False)
+            print(self.last_error)
+            return False
+
+        error_buffer = ctypes.create_string_buffer(512)
+        assert self._lib is not None
+        handle = self._lib.drv_ws_open(
+            self.driver_name.encode("utf-8"),
+            self.selector.encode("utf-8"),
+            1 if self.bus_mode == "canfd" else 0,
+            self.bitrate,
+            self.data_bitrate,
+            self.device_type,
+            self.channel,
+            error_buffer,
+            ctypes.sizeof(error_buffer),
+        )
+        if not handle:
+            self.handle = None
+            self.last_error = error_buffer.value.decode("utf-8", errors="ignore") or "未知错误"
+            self.connection_status.emit(False)
+            print(f"drv_ws CAN 连接失败 {self.selector}: {self.last_error}")
+            return False
+
+        self.handle = ctypes.c_void_p(handle)
+        self.last_error = ""
+        self.connection_status.emit(True)
+        print(
+            f"drv_ws CAN 已连接: driver={self.driver_name} selector={self.selector} "
+            f"channel={self.channel} tx_id=0x{self.tx_id:X} mode={self.bus_mode}"
+        )
+        return True
+
+    def is_connected(self) -> bool:
+        return self.handle is not None and bool(self.handle.value)
+
+    def send_frame(self, payload: bytes) -> bool:
+        if not self.is_connected():
+            return False
+        if len(payload) > 64:
+            self.last_error = f"CAN FD 单帧最多 64 字节，当前 payload 为 {len(payload)} 字节。"
+            print(self.last_error)
+            return False
+        if self.bus_mode != "canfd" and len(payload) > 8:
+            self.last_error = (
+                f"Classic CAN 单帧最多 8 字节，当前 payload 为 {len(payload)} 字节。"
+                " 若不改发送内容，请将 can.bus_mode 设为 canfd。"
+            )
+            print(self.last_error)
+            return False
+
+        error_buffer = ctypes.create_string_buffer(512)
+        data_buffer = ctypes.create_string_buffer(payload, len(payload))
+        assert self._lib is not None and self.handle is not None
+        ok = self._lib.drv_ws_send(
+            self.handle,
+            self.tx_id,
+            1 if self.extended_id else 0,
+            1 if self.bus_mode == "canfd" else 0,
+            1 if self.bitrate_switch else 0,
+            len(payload),
+            ctypes.cast(data_buffer, ctypes.c_void_p),
+            error_buffer,
+            ctypes.sizeof(error_buffer),
+        )
+        if ok:
+            return True
+
+        self.last_error = error_buffer.value.decode("utf-8", errors="ignore") or "未知错误"
+        print(f"drv_ws CAN 发送失败: {self.last_error}")
+        self.close()
+        self.connection_status.emit(False)
+        return False
+
+    def close(self) -> None:
+        if self.handle is not None and self._lib is not None:
+            self._lib.drv_ws_close(self.handle)
+            self.handle = None
+            print(f"drv_ws CAN 已关闭: {self.selector}")
 
 
 class TuningWindow(QMainWindow):
@@ -200,7 +444,7 @@ class MainWindow(QMainWindow):
         self.p_data = None
         self.st_frame_info = None
 
-        self.serial_comm: SerialCommunication | None = None
+        self.can_comm: object | None = None
         self.video_cap = None
         self.video_fps = 0.0
         self.video_total_frames = 0
@@ -225,8 +469,8 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
         self.init_tuning_window()
-        self.apply_runtime_config(self.config, reconnect_serial=False)
-        self.setup_serial()
+        self.apply_runtime_config(self.config, reconnect_can=False)
+        self.setup_can()
         self.frame_timer.start(30)
 
     def init_ui(self) -> None:
@@ -265,9 +509,9 @@ class MainWindow(QMainWindow):
         self.camera_mode_button.clicked.connect(self.switch_to_camera_mode)
         button_layout.addWidget(self.camera_mode_button)
 
-        self.refresh_serial_button = QPushButton("重连串口")
-        self.refresh_serial_button.clicked.connect(self.refresh_connection)
-        button_layout.addWidget(self.refresh_serial_button)
+        self.refresh_can_button = QPushButton("重连 CAN")
+        self.refresh_can_button.clicked.connect(self.refresh_connection)
+        button_layout.addWidget(self.refresh_can_button)
 
         self.reload_config_button = QPushButton("重载配置")
         self.reload_config_button.clicked.connect(self.reload_runtime_config)
@@ -279,7 +523,7 @@ class MainWindow(QMainWindow):
         self.video_slider.valueChanged.connect(self.on_video_slider_changed)
         root_layout.addWidget(self.video_slider)
 
-        self.connection_status_label = QLabel("串口: 未初始化")
+        self.connection_status_label = QLabel("CAN: 未初始化")
         self.camera_status_label = QLabel("相机: 未初始化")
         self.detect_status_label = QLabel("检测: 未开始")
         self.config_status_label = QLabel("配置: 未加载")
@@ -321,10 +565,10 @@ class MainWindow(QMainWindow):
         for control in self.tuning_controls.values():
             control.setEnabled(enabled)
 
-    def apply_runtime_config(self, config: dict, reconnect_serial: bool = True) -> None:
+    def apply_runtime_config(self, config: dict, reconnect_can: bool = True) -> None:
         self.config = config
         self.camera_config = config.get("camera", {})
-        self.serial_config = config.get("serial", {})
+        self.can_config = config.get("can", {})
         self.detection_config = copy.deepcopy(config.get("detection", {}))
         self.recording_config = config.get("recording", {})
         self.runtime_config = config.get("runtime", {})
@@ -344,18 +588,18 @@ class MainWindow(QMainWindow):
         self.update_param_summary()
         self.config_status_label.setText(f"配置: 已加载 {self.config_path.name}")
 
-        reconnect_interval = int(self.serial_config.get("reconnect_interval_ms", 5000))
-        if self.serial_config.get("enabled", False):
+        reconnect_interval = int(self.can_config.get("reconnect_interval_ms", 5000))
+        if self.can_config.get("enabled", False):
             self.reconnect_timer.start(reconnect_interval)
         else:
             self.reconnect_timer.stop()
-            self.connection_status_label.setText("串口: 已禁用")
-            self._close_serial()
+            self.connection_status_label.setText("CAN: 已禁用")
+            self._close_can()
 
         if self.camera is not None:
             self.apply_camera_parameters()
-        if reconnect_serial and self.serial_config.get("enabled", False):
-            self.setup_serial()
+        if reconnect_can and self.can_config.get("enabled", False):
+            self.setup_can()
 
     def apply_ui_window_visibility(self) -> None:
         display_enabled = bool(self.ui_config.get("enable_display_window", True))
@@ -536,7 +780,7 @@ class MainWindow(QMainWindow):
     def reload_runtime_config(self) -> None:
         try:
             config = load_config(self.config_path)
-            self.apply_runtime_config(config, reconnect_serial=True)
+            self.apply_runtime_config(config, reconnect_can=True)
             print("配置已重新加载")
         except Exception as exc:
             print(f"重载配置失败: {exc}")
@@ -635,42 +879,98 @@ class MainWindow(QMainWindow):
         self.process_frame(frame_rgb, source_name="image", fps=None)
         self.runtime_hint_label.setText(f"提示: 已加载测试图片 {Path(image_path).name}")
 
-    def setup_serial(self) -> None:
-        self._close_serial()
-        if not self.serial_config.get("enabled", False):
-            self.connection_status_label.setText("串口: 已禁用")
+    @staticmethod
+    def parse_can_id(value) -> int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value, 0)
+        raise ValueError(f"无效的 CAN ID: {value!r}")
+
+    @staticmethod
+    def parse_config_int(value, default: int) -> int:
+        if value is None:
+            return default
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value, 0)
+        return default
+
+    def setup_can(self) -> None:
+        self._close_can()
+        if not self.can_config.get("enabled", False):
+            self.connection_status_label.setText("CAN: 已禁用")
             return
 
-        baudrate = int(self.serial_config.get("baudrate", 115200))
-        candidates = discover_serial_ports(
-            [self.serial_config.get("primary_port")] + list(self.serial_config.get("backup_ports", []))
-        )
-        if not candidates:
-            self.connection_status_label.setText("串口: 未找到可用端口")
-            return
+        driver = str(self.can_config.get("driver", "dameow")).lower()
+        interface_name = str(self.can_config.get("interface", "can0")).strip()
+        selector = str(self.can_config.get("selector", "0")).strip()
+        bridge_library = str(self.can_config.get("bridge_library", "")).strip()
+        tx_id = self.parse_can_id(self.can_config.get("tx_id", 0x123))
+        bus_mode = str(self.can_config.get("bus_mode", "canfd")).lower()
+        bitrate_switch = bool(self.can_config.get("bitrate_switch", True))
+        extended_id = bool(self.can_config.get("extended_id", False))
+        bitrate = self.parse_config_int(self.can_config.get("bitrate", 500000), 500000)
+        data_bitrate = self.parse_config_int(self.can_config.get("data_bitrate", 2000000), 2000000)
+        channel = self.parse_config_int(self.can_config.get("channel", 0), 0)
+        device_type = self.parse_config_int(self.can_config.get("device_type", 0), 0)
 
-        for port in candidates:
-            serial_comm = SerialCommunication(port=port, baudrate=baudrate)
-            if serial_comm.is_connected():
-                self.serial_comm = serial_comm
-                self.connection_status_label.setText(f"串口: 已连接 {port}")
+        if driver == "socketcan":
+            if not interface_name:
+                self.connection_status_label.setText("CAN: interface 为空")
                 return
+            can_comm = CanCommunication(
+                interface_name=interface_name,
+                tx_id=tx_id,
+                bus_mode=bus_mode,
+                bitrate_switch=bitrate_switch,
+                extended_id=extended_id,
+            )
+        elif driver == "dameow":
+            if not selector:
+                self.connection_status_label.setText("CAN: selector 为空")
+                return
+            can_comm = DrvWsCanCommunication(
+                driver_name=driver,
+                selector=selector,
+                tx_id=tx_id,
+                bus_mode=bus_mode,
+                bitrate_switch=bitrate_switch,
+                extended_id=extended_id,
+                bitrate=bitrate,
+                data_bitrate=data_bitrate,
+                device_type=device_type,
+                channel=channel,
+                bridge_library=bridge_library,
+            )
+        else:
+            self.connection_status_label.setText(f"CAN: 暂不支持的 driver={driver}")
+            return
 
-        self.connection_status_label.setText("串口: 连接失败")
+        if can_comm.is_connected():
+            self.can_comm = can_comm
+            name = getattr(can_comm, "connection_name", interface_name or selector)
+            self.connection_status_label.setText(f"CAN: 已连接 {name} tx_id=0x{tx_id:X}")
+            return
 
-    def _close_serial(self) -> None:
-        if self.serial_comm is not None:
-            self.serial_comm.close()
-            self.serial_comm = None
+        error_detail = f" ({can_comm.last_error})" if can_comm.last_error else ""
+        self.connection_status_label.setText(f"CAN: 连接失败{error_detail}")
+
+    def _close_can(self) -> None:
+        if self.can_comm is not None:
+            self.can_comm.close()
+            self.can_comm = None
 
     def refresh_connection(self) -> None:
-        if not self.serial_config.get("enabled", False):
-            self.connection_status_label.setText("串口: 已禁用")
+        if not self.can_config.get("enabled", False):
+            self.connection_status_label.setText("CAN: 已禁用")
             return
-        if self.serial_comm is not None and self.serial_comm.is_connected():
-            self.connection_status_label.setText(f"串口: 已连接 {self.serial_comm.port}")
+        if self.can_comm is not None and self.can_comm.is_connected():
+            name = getattr(self.can_comm, "connection_name", "unknown")
+            self.connection_status_label.setText(f"CAN: 已连接 {name}")
             return
-        self.setup_serial()
+        self.setup_can()
 
     def _convert_raw_frame_to_rgb(
         self,
@@ -787,18 +1087,21 @@ class MainWindow(QMainWindow):
         self.maybe_log_detection(targets, source_name)
 
     def send_detection_result(self, targets: list[dict]) -> None:
-        if self.serial_comm is None or not self.serial_comm.is_connected():
+        if self.can_comm is None or not self.can_comm.is_connected():
             return
-        send_every_n = max(int(self.serial_config.get("send_every_n_frames", 1)), 1)
+        send_every_n = max(int(self.can_config.get("send_every_n_frames", 1)), 1)
         if self.processed_frame_count % send_every_n != 0:
             return
 
-        payload = self.build_serial_packet(targets)
-        if self.serial_comm.send_frame(payload):
-            self.connection_status_label.setText(f"串口: 已连接 {self.serial_comm.port}")
+        payload = self.build_detection_packet(targets)
+        if self.can_comm.send_frame(payload):
+            name = getattr(self.can_comm, "connection_name", "unknown")
+            self.connection_status_label.setText(
+                f"CAN: 已连接 {name} tx_id=0x{self.can_comm.tx_id:X}"
+            )
 
     @staticmethod
-    def build_serial_packet(targets: list[dict]) -> bytes:
+    def build_detection_packet(targets: list[dict]) -> bytes:
         near_target = targets[0] if len(targets) > 0 else None
         far_target = targets[1] if len(targets) > 1 else None
         near_offset = near_target["offset"] if near_target is not None else (0.0, 0.0)
@@ -1040,7 +1343,7 @@ class MainWindow(QMainWindow):
         if self.video_cap is not None:
             self.video_cap.release()
             self.video_cap = None
-        self._close_serial()
+        self._close_can()
         if self.camera is not None:
             self.camera.MV_CC_StopGrabbing()
             self.camera.MV_CC_CloseDevice()
