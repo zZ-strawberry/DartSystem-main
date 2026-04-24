@@ -2,10 +2,10 @@
 
 用于检测明亮的圆形绿光，并将识别结果通过 CAN 发送到下位机。
 
-当前主通信路径是：
+当前默认通信路径是：
 
 - Linux
-- `drv_ws` 的 `DaMeowCAN`
+- `SocketCAN`
 - CAN FD
 - 应用层 payload 保持不变：
   `帧头 + 长度 + 7个float32小端 + CRC16 + 帧尾`
@@ -25,8 +25,8 @@
 - [opencv_green_detection.py](/E:/DartSystem-main/opencv_green_detection.py:1)：绿光检测算法
 - [app_config.py](/E:/DartSystem-main/app_config.py:1)：默认配置与配置保存
 - [config.yaml](/E:/DartSystem-main/config.yaml:1)：主配置文件
-- [drv_ws](/E:/DartSystem-main/drv_ws:1)：下位机 CAN 驱动库
-- [drv_ws_bridge](/E:/DartSystem-main/drv_ws_bridge:1)：Python 调 `drv_ws` 的桥接层
+- [drv_ws](/E:/DartSystem-main/drv_ws:1)：达妙 CAN 盒驱动库，可选
+- [drv_ws_bridge](/E:/DartSystem-main/drv_ws_bridge:1)：Python 调 `drv_ws` 的桥接层，可选
 
 ## 环境
 
@@ -49,7 +49,7 @@ pip install -r requirements.txt
 
 ## 编译 drv_ws_bridge
 
-主程序不会直接调用 `drv_ws` 的 C++ 类，而是通过桥接库 `libdrv_ws_bridge.so` 调用。
+如果你使用达妙 CAN 盒的 `dameow` 驱动，主程序会通过桥接库 `libdrv_ws_bridge.so` 调 `drv_ws`。
 
 编译命令：
 
@@ -88,51 +88,52 @@ test:
 
 主配置在 [config.yaml](/E:/DartSystem-main/config.yaml:1)。
 
-达妙 CAN 盒推荐起始配置：
+SocketCAN 推荐起始配置：
 
 ```yaml
 can:
   enabled: true
-  driver: "dameow"
-  selector: "0"
+  driver: "socketcan"
+  interface: "can0"
   tx_id: "0x123"
   extended_id: false
   bus_mode: "canfd"
   bitrate: 500000
   data_bitrate: 2000000
   bitrate_switch: true
+  reconnect_interval_ms: 5000
+  send_every_n_frames: 1
+```
+
+如果改用达妙 CAN 盒：
+
+```yaml
+can:
+  driver: "dameow"
+  selector: "0"
   channel: 0
   device_type: 0
   bridge_library: ""
-  reconnect_interval_ms: 5000
-  send_every_n_frames: 1
 ```
 
 参数说明：
 
 - `enabled`：是否启用 CAN 发送
-- `driver`：`dameow` 或 `socketcan`。当前主路径用 `dameow`
-- `selector`：达妙设备选择器，可填设备索引、SN、别名。单设备时通常先用 `"0"`
+- `driver`：`socketcan` 或 `dameow`。当前默认用 `socketcan`
+- `interface`：SocketCAN 接口名，`socketcan` 时必填
+- `selector`：达妙设备选择器，可填设备索引、SN、别名，仅 `dameow` 使用
 - `tx_id`：发送给下位机的 CAN ID
 - `extended_id`：是否使用扩展帧
 - `bus_mode`：当前必须使用 `canfd`。因为应用层 payload 是 33 字节，Classic CAN 单帧放不下
 - `bitrate`：仲裁域波特率
 - `data_bitrate`：数据域波特率
 - `bitrate_switch`：CAN FD 是否启用 BRS
-- `channel`：达妙设备通道号，通常先用 `0`
-- `device_type`：设备类型，默认 `0`，即 `DEV_USB2CANFD`
-- `bridge_library`：桥接库路径。留空时自动搜索 `drv_ws_bridge/build/libdrv_ws_bridge.so`
+- `channel`：达妙设备通道号，仅 `dameow` 使用，通常先用 `0`
+- `device_type`：设备类型，仅 `dameow` 使用，默认 `0`，即 `DEV_USB2CANFD`
+- `bridge_library`：桥接库路径，仅 `dameow` 使用。留空时自动搜索 `drv_ws_bridge/build/libdrv_ws_bridge.so`
 - `send_every_n_frames`：每几帧发送一次
 
-如果改用 `socketcan`，还需要配置：
-
-```yaml
-can:
-  driver: "socketcan"
-  interface: "can0"
-```
-
-并提前由系统把接口拉起。注意：即使走 `socketcan`，当前 33 字节 payload 依然要求 CAN FD。
+使用 `socketcan` 前，需要先由系统把接口按相同参数拉起。注意：当前 33 字节 payload 依然要求 CAN FD。
 
 ## 发送内容
 
@@ -185,10 +186,11 @@ Byte32:   0x5A
 ## 建议联调顺序
 
 1. 先编译 `drv_ws_bridge`
-2. 用 `runtime.mode=test` 跑视频，确认检测结果稳定
-3. 打开 `can.enabled=true`
-4. 确认下位机监听的 `tx_id`、CAN FD 参数与配置一致
-5. 再切到海康相机实时模式
+2. 如果使用 `socketcan`，先把 `can0` 拉起
+3. 用 `runtime.mode=test` 跑视频，确认检测结果稳定
+4. 打开 `can.enabled=true`
+5. 确认下位机监听的 `tx_id`、CAN FD 参数与配置一致
+6. 再切到海康相机实时模式
 
 ## 常见问题
 
@@ -212,6 +214,7 @@ Byte32:   0x5A
 
 ## 当前限制
 
-- `drv_ws_bridge` 需要在 Linux 上编译
+- `socketcan` 模式不依赖 `drv_ws_bridge`
+- `drv_ws_bridge` 只在 `dameow` 模式下需要，并且必须在 Linux 上编译
 - 目前没有把 33 字节 payload 拆分成多帧 Classic CAN
-- 当前重点支持达妙 CAN 盒；`socketcan` 仅保留兼容路径
+- 当前默认支持 `socketcan`；`dameow` 作为可选驱动保留

@@ -903,7 +903,7 @@ class MainWindow(QMainWindow):
             self.connection_status_label.setText("CAN: 已禁用")
             return
 
-        driver = str(self.can_config.get("driver", "dameow")).lower()
+        driver = str(self.can_config.get("driver", "socketcan")).lower()
         interface_name = str(self.can_config.get("interface", "can0")).strip()
         selector = str(self.can_config.get("selector", "0")).strip()
         bridge_library = str(self.can_config.get("bridge_library", "")).strip()
