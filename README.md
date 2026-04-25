@@ -1,14 +1,13 @@
 # DartSystem
 
-用于检测明亮的圆形绿光，并将识别结果通过 CAN 发送到下位机。
+用于检测明亮的圆形绿光，并将识别结果通过 **SocketCAN + CAN FD** 发送到下位机。
 
-当前默认通信路径是：
+当前通信实现只保留这一条路径：
 
 - Linux
-- `SocketCAN`
+- `socketcan`
 - CAN FD
-- 应用层 payload 保持不变：
-  `帧头 + 长度 + 7个float32小端 + CRC16 + 帧尾`
+- 应用层 payload 不变
 
 ## 功能
 
@@ -19,27 +18,14 @@
 - 实时调参与保存到 `config.yaml`
 - 通过 CAN FD 向下位机发送结果
 
-## 目录
+## 文件
 
 - [main.py](/E:/DartSystem-main/main.py:1)：主程序、GUI、相机、CAN 发送
 - [opencv_green_detection.py](/E:/DartSystem-main/opencv_green_detection.py:1)：绿光检测算法
 - [app_config.py](/E:/DartSystem-main/app_config.py:1)：默认配置与配置保存
 - [config.yaml](/E:/DartSystem-main/config.yaml:1)：主配置文件
-- [drv_ws](/E:/DartSystem-main/drv_ws:1)：达妙 CAN 盒驱动库，可选
-- [drv_ws_bridge](/E:/DartSystem-main/drv_ws_bridge:1)：Python 调 `drv_ws` 的桥接层，可选
 
-## 环境
-
-仅推荐在 Linux 上部署 CAN 功能。
-
-系统依赖：
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake pkg-config libusb-1.0-0-dev
-```
-
-Python 环境：
+## Python 环境
 
 ```bash
 python3 -m venv .venv
@@ -47,22 +33,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 编译 drv_ws_bridge
+## SocketCAN 准备
 
-如果你使用达妙 CAN 盒的 `dameow` 驱动，主程序会通过桥接库 `libdrv_ws_bridge.so` 调 `drv_ws`。
+程序不会自动配置 `can0`，要先在系统里把接口拉起。
 
-编译命令：
+按当前默认参数：
+
+- `bitrate = 500000`
+- `data_bitrate = 2000000`
+- `fd on`
+
+执行：
 
 ```bash
-cmake -S drv_ws_bridge -B drv_ws_bridge/build
-cmake --build drv_ws_bridge/build -j
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on
+sudo ip link set can0 up
 ```
 
-编译完成后，至少应看到：
+检查：
 
 ```bash
-drv_ws_bridge/build/libdrv_ws_bridge.so
-drv_ws_bridge/build/libdm_device.so
+ip -details link show can0
 ```
 
 ## 运行
@@ -86,9 +78,7 @@ test:
 
 ## CAN 配置
 
-主配置在 [config.yaml](/E:/DartSystem-main/config.yaml:1)。
-
-SocketCAN 推荐起始配置：
+[config.yaml](/E:/DartSystem-main/config.yaml:1) 中的推荐配置：
 
 ```yaml
 can:
@@ -105,39 +95,22 @@ can:
   send_every_n_frames: 1
 ```
 
-如果改用达妙 CAN 盒：
-
-```yaml
-can:
-  driver: "dameow"
-  selector: "0"
-  channel: 0
-  device_type: 0
-  bridge_library: ""
-```
-
 参数说明：
 
 - `enabled`：是否启用 CAN 发送
-- `driver`：`socketcan` 或 `dameow`。当前默认用 `socketcan`
-- `interface`：SocketCAN 接口名，`socketcan` 时必填
-- `selector`：达妙设备选择器，可填设备索引、SN、别名，仅 `dameow` 使用
+- `driver`：当前固定使用 `socketcan`
+- `interface`：SocketCAN 接口名，如 `can0`
 - `tx_id`：发送给下位机的 CAN ID
 - `extended_id`：是否使用扩展帧
-- `bus_mode`：当前必须使用 `canfd`。因为应用层 payload 是 33 字节，Classic CAN 单帧放不下
-- `bitrate`：仲裁域波特率
-- `data_bitrate`：数据域波特率
+- `bus_mode`：当前必须使用 `canfd`
+- `bitrate`：仲裁域波特率，仅作为配置记录
+- `data_bitrate`：数据域波特率，仅作为配置记录
 - `bitrate_switch`：CAN FD 是否启用 BRS
-- `channel`：达妙设备通道号，仅 `dameow` 使用，通常先用 `0`
-- `device_type`：设备类型，仅 `dameow` 使用，默认 `0`，即 `DEV_USB2CANFD`
-- `bridge_library`：桥接库路径，仅 `dameow` 使用。留空时自动搜索 `drv_ws_bridge/build/libdrv_ws_bridge.so`
 - `send_every_n_frames`：每几帧发送一次
-
-使用 `socketcan` 前，需要先由系统把接口按相同参数拉起。注意：当前 33 字节 payload 依然要求 CAN FD。
 
 ## 发送内容
 
-发送给下位机的应用层内容没有改，仍然是 33 字节：
+发送给下位机的应用层数据没有改，仍然是 33 字节：
 
 ```text
 Byte0:    0xA5
@@ -161,13 +134,13 @@ Byte32:   0x5A
 
 - `dx = target_x - center_x`
 - `dy = target_y - center_y`
-- 近/远分类由面积阈值决定，不是简单按相对大小排序
+- 当前发送的是偏移量，不是绝对像素坐标
 
-## 现场调参
+## 调参
 
 高频调参参数都在 `config.yaml` 的 `detection` 段。
 
-最常调的参数：
+最常调：
 
 - `detection.hsv.lower / upper`
 - `detection.brightness.min_v`
@@ -183,38 +156,31 @@ Byte32:   0x5A
 - 实时调参开关
 - 保存当前实时参数到配置
 
-## 建议联调顺序
+## 联调顺序
 
-1. 先编译 `drv_ws_bridge`
-2. 如果使用 `socketcan`，先把 `can0` 拉起
-3. 用 `runtime.mode=test` 跑视频，确认检测结果稳定
-4. 打开 `can.enabled=true`
-5. 确认下位机监听的 `tx_id`、CAN FD 参数与配置一致
-6. 再切到海康相机实时模式
+1. 先把 `can0` 按 CAN FD 参数拉起
+2. 用 `runtime.mode=test` 跑视频，确认检测结果稳定
+3. 打开 `can.enabled=true`
+4. 确认下位机监听的 `tx_id`、波特率、CAN FD 参数一致
+5. 再切海康相机实时模式
 
 ## 常见问题
 
-`CAN: 连接失败 (未找到 drv_ws bridge 库)`
+`CAN: 连接失败 (No such device)`
 
-- 说明桥接库没编出来，或者 `bridge_library` 路径不对
+- 说明 `can0` 不存在
 
-`No DaMeow devices found`
+`CAN: 连接失败 (Operation not supported)`
 
-- 说明 `drv_ws` 没找到达妙设备，先检查 USB 连接和设备状态
-
-`CANFD requested but selected DaMeow device does not support CANFD`
-
-- 当前设备或配置不支持 CAN FD
-- 在“不改发送内容”的前提下，这种情况无法继续，必须让链路支持 CAN FD
+- 说明接口或驱动没有正确支持 CAN FD
 
 `Classic CAN 单帧最多 8 字节`
 
 - 当前应用层包是 33 字节
-- 不允许继续用 Classic CAN 单帧发送
+- 如果不改协议，就必须继续使用 `canfd`
 
 ## 当前限制
 
-- `socketcan` 模式不依赖 `drv_ws_bridge`
-- `drv_ws_bridge` 只在 `dameow` 模式下需要，并且必须在 Linux 上编译
-- 目前没有把 33 字节 payload 拆分成多帧 Classic CAN
-- 当前默认支持 `socketcan`；`dameow` 作为可选驱动保留
+- 仅保留 `socketcan` 通信路径
+- 当前 33 字节 payload 没有拆成多帧 Classic CAN
+- Linux 部署时需要系统已正确提供 `can0`

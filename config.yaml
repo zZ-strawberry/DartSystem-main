@@ -21,28 +21,21 @@ camera:
   gain: 5.9
 
 # CAN 通信参数
-# driver: socketcan 或 dameow
-# interface: SocketCAN 接口名，如 can0；socketcan 时必填
-# selector: dameow 设备选择器，可填设备索引/SN/别名；仅 dameow 生效
+# driver: 当前仅支持 socketcan
+# interface: SocketCAN 接口名，如 can0
 # tx_id: 发送到下位机的 CAN ID
 # bus_mode: can 或 canfd；当前 33 字节 payload 想保持不变时，应使用 canfd
-# bitrate/data_bitrate: socketcan 时需先在系统中把接口按相同参数拉起；dameow 时会传给 drv_ws
-# channel/device_type: dameow 通道与设备类型，device_type 默认 0=DEV_USB2CANFD，仅 dameow 生效
-# bridge_library: drv_ws bridge 动态库路径，仅 dameow 生效；留空时自动搜索 drv_ws_bridge/build/libdrv_ws_bridge.so
+# bitrate/data_bitrate: 仅用于记录；SocketCAN 接口需在系统中按相同参数预先配置并拉起
 can:
   enabled: true
   driver: "socketcan"
   interface: "can0"
-  selector: "0"
   tx_id: "0x123"
   extended_id: false
   bus_mode: "canfd"
   bitrate: 500000
   data_bitrate: 2000000
   bitrate_switch: true
-  channel: 0
-  device_type: 0
-  bridge_library: ""
   reconnect_interval_ms: 5000
   send_every_n_frames: 1
 

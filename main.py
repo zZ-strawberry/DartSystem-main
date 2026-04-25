@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import atexit
 import copy
-import ctypes
 from pathlib import Path
 import signal
 import socket
@@ -175,196 +174,6 @@ class CanCommunication(QObject):
             self.sock.close()
             self.sock = None
             print(f"CAN 已关闭: {self.interface_name}")
-
-
-class DrvWsCanCommunication(QObject):
-    connection_status = pyqtSignal(bool)
-
-    def __init__(
-        self,
-        driver_name: str,
-        selector: str,
-        tx_id: int,
-        bus_mode: str,
-        bitrate_switch: bool,
-        extended_id: bool,
-        bitrate: int,
-        data_bitrate: int,
-        device_type: int,
-        channel: int,
-        bridge_library: str = "",
-    ):
-        super().__init__()
-        self.driver_name = driver_name
-        self.selector = selector
-        self.connection_name = selector
-        self.tx_id = tx_id
-        self.bus_mode = str(bus_mode).lower()
-        self.bitrate_switch = bool(bitrate_switch)
-        self.extended_id = bool(extended_id)
-        self.bitrate = int(bitrate)
-        self.data_bitrate = int(data_bitrate)
-        self.device_type = int(device_type)
-        self.channel = int(channel)
-        self.bridge_library = bridge_library
-        self.handle: ctypes.c_void_p | None = None
-        self._lib = None
-        self.last_error = ""
-        self.connect_can()
-
-    @staticmethod
-    def _resolve_library_path(configured_path: str) -> Path | None:
-        candidates: list[Path] = []
-        if configured_path:
-            candidates.append(Path(configured_path))
-
-        build_root = PROJECT_ROOT / "drv_ws_bridge" / "build"
-        candidates.extend(
-            [
-                build_root / "libdrv_ws_bridge.so",
-                build_root / "Release" / "libdrv_ws_bridge.so",
-                build_root / "Debug" / "libdrv_ws_bridge.so",
-            ]
-        )
-        if build_root.exists():
-            candidates.extend(sorted(build_root.rglob("libdrv_ws_bridge.so")))
-
-        seen: set[Path] = set()
-        for candidate in candidates:
-            resolved = candidate if candidate.is_absolute() else (PROJECT_ROOT / candidate).resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            if resolved.exists():
-                return resolved
-        return None
-
-    def _load_library(self) -> bool:
-        path = self._resolve_library_path(self.bridge_library)
-        if path is None:
-            self.last_error = "未找到 drv_ws bridge 库，请先编译 drv_ws_bridge/libdrv_ws_bridge.so"
-            return False
-        try:
-            lib = ctypes.CDLL(str(path))
-        except OSError as exc:
-            self.last_error = f"加载 bridge 库失败: {exc}"
-            return False
-
-        lib.drv_ws_open.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            ctypes.c_uint8,
-            ctypes.c_char_p,
-            ctypes.c_size_t,
-        ]
-        lib.drv_ws_open.restype = ctypes.c_void_p
-        lib.drv_ws_send.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_uint32,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_uint8,
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-            ctypes.c_size_t,
-        ]
-        lib.drv_ws_send.restype = ctypes.c_int
-        lib.drv_ws_close.argtypes = [ctypes.c_void_p]
-        lib.drv_ws_close.restype = None
-        self._lib = lib
-        return True
-
-    def connect_can(self) -> bool:
-        if not sys.platform.startswith("linux"):
-            self.last_error = "drv_ws bridge 当前仅支持 Linux。"
-            self.connection_status.emit(False)
-            print(self.last_error)
-            return False
-        if not self._load_library():
-            self.connection_status.emit(False)
-            print(self.last_error)
-            return False
-
-        error_buffer = ctypes.create_string_buffer(512)
-        assert self._lib is not None
-        handle = self._lib.drv_ws_open(
-            self.driver_name.encode("utf-8"),
-            self.selector.encode("utf-8"),
-            1 if self.bus_mode == "canfd" else 0,
-            self.bitrate,
-            self.data_bitrate,
-            self.device_type,
-            self.channel,
-            error_buffer,
-            ctypes.sizeof(error_buffer),
-        )
-        if not handle:
-            self.handle = None
-            self.last_error = error_buffer.value.decode("utf-8", errors="ignore") or "未知错误"
-            self.connection_status.emit(False)
-            print(f"drv_ws CAN 连接失败 {self.selector}: {self.last_error}")
-            return False
-
-        self.handle = ctypes.c_void_p(handle)
-        self.last_error = ""
-        self.connection_status.emit(True)
-        print(
-            f"drv_ws CAN 已连接: driver={self.driver_name} selector={self.selector} "
-            f"channel={self.channel} tx_id=0x{self.tx_id:X} mode={self.bus_mode}"
-        )
-        return True
-
-    def is_connected(self) -> bool:
-        return self.handle is not None and bool(self.handle.value)
-
-    def send_frame(self, payload: bytes) -> bool:
-        if not self.is_connected():
-            return False
-        if len(payload) > 64:
-            self.last_error = f"CAN FD 单帧最多 64 字节，当前 payload 为 {len(payload)} 字节。"
-            print(self.last_error)
-            return False
-        if self.bus_mode != "canfd" and len(payload) > 8:
-            self.last_error = (
-                f"Classic CAN 单帧最多 8 字节，当前 payload 为 {len(payload)} 字节。"
-                " 若不改发送内容，请将 can.bus_mode 设为 canfd。"
-            )
-            print(self.last_error)
-            return False
-
-        error_buffer = ctypes.create_string_buffer(512)
-        data_buffer = ctypes.create_string_buffer(payload, len(payload))
-        assert self._lib is not None and self.handle is not None
-        ok = self._lib.drv_ws_send(
-            self.handle,
-            self.tx_id,
-            1 if self.extended_id else 0,
-            1 if self.bus_mode == "canfd" else 0,
-            1 if self.bitrate_switch else 0,
-            len(payload),
-            ctypes.cast(data_buffer, ctypes.c_void_p),
-            error_buffer,
-            ctypes.sizeof(error_buffer),
-        )
-        if ok:
-            return True
-
-        self.last_error = error_buffer.value.decode("utf-8", errors="ignore") or "未知错误"
-        print(f"drv_ws CAN 发送失败: {self.last_error}")
-        self.close()
-        self.connection_status.emit(False)
-        return False
-
-    def close(self) -> None:
-        if self.handle is not None and self._lib is not None:
-            self._lib.drv_ws_close(self.handle)
-            self.handle = None
-            print(f"drv_ws CAN 已关闭: {self.selector}")
 
 
 class TuningWindow(QMainWindow):
@@ -887,16 +696,6 @@ class MainWindow(QMainWindow):
             return int(value, 0)
         raise ValueError(f"无效的 CAN ID: {value!r}")
 
-    @staticmethod
-    def parse_config_int(value, default: int) -> int:
-        if value is None:
-            return default
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str):
-            return int(value, 0)
-        return default
-
     def setup_can(self) -> None:
         self._close_can()
         if not self.can_config.get("enabled", False):
@@ -905,53 +704,28 @@ class MainWindow(QMainWindow):
 
         driver = str(self.can_config.get("driver", "socketcan")).lower()
         interface_name = str(self.can_config.get("interface", "can0")).strip()
-        selector = str(self.can_config.get("selector", "0")).strip()
-        bridge_library = str(self.can_config.get("bridge_library", "")).strip()
         tx_id = self.parse_can_id(self.can_config.get("tx_id", 0x123))
         bus_mode = str(self.can_config.get("bus_mode", "canfd")).lower()
         bitrate_switch = bool(self.can_config.get("bitrate_switch", True))
         extended_id = bool(self.can_config.get("extended_id", False))
-        bitrate = self.parse_config_int(self.can_config.get("bitrate", 500000), 500000)
-        data_bitrate = self.parse_config_int(self.can_config.get("data_bitrate", 2000000), 2000000)
-        channel = self.parse_config_int(self.can_config.get("channel", 0), 0)
-        device_type = self.parse_config_int(self.can_config.get("device_type", 0), 0)
-
-        if driver == "socketcan":
-            if not interface_name:
-                self.connection_status_label.setText("CAN: interface 为空")
-                return
-            can_comm = CanCommunication(
-                interface_name=interface_name,
-                tx_id=tx_id,
-                bus_mode=bus_mode,
-                bitrate_switch=bitrate_switch,
-                extended_id=extended_id,
-            )
-        elif driver == "dameow":
-            if not selector:
-                self.connection_status_label.setText("CAN: selector 为空")
-                return
-            can_comm = DrvWsCanCommunication(
-                driver_name=driver,
-                selector=selector,
-                tx_id=tx_id,
-                bus_mode=bus_mode,
-                bitrate_switch=bitrate_switch,
-                extended_id=extended_id,
-                bitrate=bitrate,
-                data_bitrate=data_bitrate,
-                device_type=device_type,
-                channel=channel,
-                bridge_library=bridge_library,
-            )
-        else:
+        if driver != "socketcan":
             self.connection_status_label.setText(f"CAN: 暂不支持的 driver={driver}")
             return
+        if not interface_name:
+            self.connection_status_label.setText("CAN: interface 为空")
+            return
+
+        can_comm = CanCommunication(
+            interface_name=interface_name,
+            tx_id=tx_id,
+            bus_mode=bus_mode,
+            bitrate_switch=bitrate_switch,
+            extended_id=extended_id,
+        )
 
         if can_comm.is_connected():
             self.can_comm = can_comm
-            name = getattr(can_comm, "connection_name", interface_name or selector)
-            self.connection_status_label.setText(f"CAN: 已连接 {name} tx_id=0x{tx_id:X}")
+            self.connection_status_label.setText(f"CAN: 已连接 {interface_name} tx_id=0x{tx_id:X}")
             return
 
         error_detail = f" ({can_comm.last_error})" if can_comm.last_error else ""
