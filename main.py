@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import copy
+import errno
 from pathlib import Path
 import signal
 import socket
@@ -81,12 +82,16 @@ def crc16_ccitt(data: bytes, initial: int = 0xFFFF) -> int:
 
 class CanCommunication(QObject):
     connection_status = pyqtSignal(bool)
+    CLASSIC_SEG_START = 0xA5
+    CLASSIC_SEG_CONT = 0x5A
+    CLASSIC_FIRST_CHUNK_SIZE = 4
+    CLASSIC_CONT_CHUNK_SIZE = 6
 
     def __init__(
         self,
         interface_name: str,
         tx_id: int,
-        bus_mode: str = "canfd",
+        bus_mode: str = "can",
         bitrate_switch: bool = True,
         extended_id: bool = False,
     ):
@@ -100,6 +105,7 @@ class CanCommunication(QObject):
         self.extended_id = bool(extended_id)
         self.sock: socket.socket | None = None
         self.last_error = ""
+        self._last_enobufs_log_ts = 0.0
         self.connect_can()
 
     def connect_can(self) -> bool:
@@ -115,6 +121,11 @@ class CanCommunication(QObject):
             return False
         try:
             sock = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+            # Increase TX socket buffer to reduce bursts hitting ENOBUFS.
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+            except OSError:
+                pass
             if self.bus_mode == "canfd":
                 sol_can_raw = getattr(socket, "SOL_CAN_RAW", 101)
                 can_raw_fd_frames = getattr(socket, "CAN_RAW_FD_FRAMES", 5)
@@ -135,6 +146,75 @@ class CanCommunication(QObject):
     def is_connected(self) -> bool:
         return self.sock is not None
 
+    def _build_can_id(self) -> int:
+        return self.tx_id | (0x80000000 if self.extended_id else 0)
+
+    def _send_socket_frame(self, frame: bytes) -> bool:
+        try:
+            assert self.sock is not None
+            self.sock.send(frame)
+            return True
+        except OSError as exc:
+            self.last_error = str(exc)
+            if exc.errno == errno.ENOBUFS:
+                now = time.time()
+                if now - self._last_enobufs_log_ts >= 1.0:
+                    print(f"CAN 发送拥塞: {exc}")
+                    self._last_enobufs_log_ts = now
+                return False
+
+            print(f"CAN 发送失败: {exc}")
+            self.close()
+            self.connection_status.emit(False)
+            return False
+
+    def _send_canfd_single(self, payload: bytes) -> bool:
+        flags = 0x01 if self.bitrate_switch else 0x00
+        frame = struct.pack("=IBB2x64s", self._build_can_id(), len(payload), flags, payload.ljust(64, b"\x00"))
+        return self._send_socket_frame(frame)
+
+    def _send_classic_single(self, payload: bytes) -> bool:
+        frame = struct.pack("=IB3x8s", self._build_can_id(), len(payload), payload.ljust(8, b"\x00"))
+        return self._send_socket_frame(frame)
+
+    def _send_classic_segmented(self, payload: bytes) -> bool:
+        if len(payload) > 255:
+            self.last_error = f"Classic CAN 分包长度上限为 255 字节，当前 payload 为 {len(payload)} 字节。"
+            print(self.last_error)
+            return False
+
+        first_chunk = payload[: self.CLASSIC_FIRST_CHUNK_SIZE]
+        remain = payload[self.CLASSIC_FIRST_CHUNK_SIZE :]
+        cont_chunks = [
+            remain[idx : idx + self.CLASSIC_CONT_CHUNK_SIZE]
+            for idx in range(0, len(remain), self.CLASSIC_CONT_CHUNK_SIZE)
+        ]
+        total_frames = 1 + len(cont_chunks)
+        if total_frames > 255:
+            self.last_error = f"Classic CAN 分包帧数超过上限 255，当前帧数为 {total_frames}。"
+            print(self.last_error)
+            return False
+
+        head = bytes(
+            [
+                self.CLASSIC_SEG_START,
+                len(payload) & 0xFF,
+                total_frames & 0xFF,
+                0x00,
+            ]
+        ) + first_chunk
+        if not self._send_classic_single(head):
+            return False
+
+        for seq, chunk in enumerate(cont_chunks, start=1):
+            frame_payload = bytes([self.CLASSIC_SEG_CONT, seq & 0xFF]) + chunk
+            if not self._send_classic_single(frame_payload):
+                self.last_error = f"Classic CAN 分包发送失败: seq={seq}。{self.last_error}"
+                if "没有可用的缓冲区空间" not in self.last_error and "No buffer space" not in self.last_error:
+                    print(self.last_error)
+                return False
+        return True
+
     def send_frame(self, payload: bytes) -> bool:
         if not self.is_connected():
             return False
@@ -144,30 +224,11 @@ class CanCommunication(QObject):
                 self.last_error = f"CAN FD 单帧最多 64 字节，当前 payload 为 {len(payload)} 字节。"
                 print(self.last_error)
                 return False
-            flags = 0x01 if self.bitrate_switch else 0x00
-            can_id = self.tx_id | (0x80000000 if self.extended_id else 0)
-            frame = struct.pack("=IBB2x64s", can_id, len(payload), flags, payload.ljust(64, b"\x00"))
+            return self._send_canfd_single(payload)
         else:
-            if len(payload) > 8:
-                self.last_error = (
-                    f"Classic CAN 单帧最多 8 字节，当前 payload 为 {len(payload)} 字节。"
-                    " 若不改发送内容，请将 can.bus_mode 设为 canfd。"
-                )
-                print(self.last_error)
-                return False
-            can_id = self.tx_id | (0x80000000 if self.extended_id else 0)
-            frame = struct.pack("=IB3x8s", can_id, len(payload), payload.ljust(8, b"\x00"))
-
-        try:
-            assert self.sock is not None
-            self.sock.send(frame)
-            return True
-        except OSError as exc:
-            self.last_error = str(exc)
-            print(f"CAN 发送失败: {exc}")
-            self.close()
-            self.connection_status.emit(False)
-            return False
+            if len(payload) <= 8:
+                return self._send_classic_single(payload)
+            return self._send_classic_segmented(payload)
 
     def close(self) -> None:
         if self.sock is not None:
@@ -263,6 +324,7 @@ class MainWindow(QMainWindow):
         self.debug_mode = False
         self.prev_frame_time = 0.0
         self.processed_frame_count = 0
+        self.last_can_send_ts = 0.0
         self.live_tuning_enabled = False
         self.tuning_controls: dict[str, object] = {}
         self.tuning_window: TuningWindow | None = None
@@ -705,7 +767,7 @@ class MainWindow(QMainWindow):
         driver = str(self.can_config.get("driver", "socketcan")).lower()
         interface_name = str(self.can_config.get("interface", "can0")).strip()
         tx_id = self.parse_can_id(self.can_config.get("tx_id", 0x123))
-        bus_mode = str(self.can_config.get("bus_mode", "canfd")).lower()
+        bus_mode = str(self.can_config.get("bus_mode", "can")).lower()
         bitrate_switch = bool(self.can_config.get("bitrate_switch", True))
         extended_id = bool(self.can_config.get("extended_id", False))
         if driver != "socketcan":
@@ -841,9 +903,7 @@ class MainWindow(QMainWindow):
     def process_frame(self, frame_rgb: np.ndarray, source_name: str, fps: float | None = None) -> None:
         self.processed_frame_count += 1
         targets = detect_green_targets(frame_rgb)
-
-        if source_name == "camera":
-            self.send_detection_result(targets)
+        self.send_detection_result(targets)
 
         # 左侧显示原图叠加检测信息，右侧显示掩膜图。
         result_image = self.draw_detection_overlay(
@@ -866,13 +926,22 @@ class MainWindow(QMainWindow):
         send_every_n = max(int(self.can_config.get("send_every_n_frames", 1)), 1)
         if self.processed_frame_count % send_every_n != 0:
             return
+        min_send_interval_ms = max(int(self.can_config.get("min_send_interval_ms", 120)), 0)
+        now = time.time()
+        if min_send_interval_ms > 0 and (now - self.last_can_send_ts) * 1000.0 < min_send_interval_ms:
+            return
 
         payload = self.build_detection_packet(targets)
         if self.can_comm.send_frame(payload):
+            self.last_can_send_ts = now
             name = getattr(self.can_comm, "connection_name", "unknown")
             self.connection_status_label.setText(
                 f"CAN: 已连接 {name} tx_id=0x{self.can_comm.tx_id:X}"
             )
+        else:
+            if "没有可用的缓冲区空间" in self.can_comm.last_error or "No buffer space" in self.can_comm.last_error:
+                self.last_can_send_ts = now
+                self.connection_status_label.setText("CAN: 发送拥塞，当前帧已丢弃")
 
     @staticmethod
     def build_detection_packet(targets: list[dict]) -> bytes:

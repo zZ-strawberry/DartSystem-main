@@ -1,12 +1,12 @@
 # DartSystem
 
-用于检测明亮的圆形绿光，并将识别结果通过 **SocketCAN + CAN FD** 发送到下位机。
+用于检测明亮的圆形绿光，并将识别结果通过 **SocketCAN** 发送到下位机。
 
 当前通信实现只保留这一条路径：
 
 - Linux
 - `socketcan`
-- CAN FD
+- Classic CAN（自动多帧分包）或 CAN FD（单帧）
 - 应用层 payload 不变
 
 ## 功能
@@ -16,7 +16,7 @@
 - 双目标绿光检测
 - 近目标 / 远目标面积阈值分类
 - 实时调参与保存到 `config.yaml`
-- 通过 CAN FD 向下位机发送结果
+- 通过 CAN 向下位机发送结果（Classic 分包或 CAN FD 单帧）
 
 ## 文件
 
@@ -37,13 +37,19 @@ pip install -r requirements.txt
 
 程序不会自动配置 `can0`，要先在系统里把接口拉起。
 
-按当前默认参数：
+按当前默认参数（`bus_mode: can`）：
 
 - `bitrate = 500000`
-- `data_bitrate = 2000000`
-- `fd on`
 
 执行：
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 500000
+sudo ip link set can0 up
+```
+
+如果使用 CAN FD（`bus_mode: canfd`），执行：
 
 ```bash
 sudo ip link set can0 down
@@ -76,6 +82,8 @@ test:
   auto_start: true
 ```
 
+说明：开启 `can.enabled=true` 后，`hik` 和 `test` 两种运行模式都会发送 CAN 数据。
+
 ## CAN 配置
 
 [config.yaml](/E:/DartSystem-main/config.yaml:1) 中的推荐配置：
@@ -87,12 +95,13 @@ can:
   interface: "can0"
   tx_id: "0x123"
   extended_id: false
-  bus_mode: "canfd"
+  bus_mode: "can"
   bitrate: 500000
   data_bitrate: 2000000
   bitrate_switch: true
   reconnect_interval_ms: 5000
-  send_every_n_frames: 1
+  min_send_interval_ms: 120
+  send_every_n_frames: 2
 ```
 
 参数说明：
@@ -102,10 +111,11 @@ can:
 - `interface`：SocketCAN 接口名，如 `can0`
 - `tx_id`：发送给下位机的 CAN ID
 - `extended_id`：是否使用扩展帧
-- `bus_mode`：当前必须使用 `canfd`
+- `bus_mode`：`can`（Classic CAN 自动分包）或 `canfd`（单帧）
 - `bitrate`：仲裁域波特率，仅作为配置记录
-- `data_bitrate`：数据域波特率，仅作为配置记录
+- `data_bitrate`：数据域波特率，`canfd` 模式下使用
 - `bitrate_switch`：CAN FD 是否启用 BRS
+- `min_send_interval_ms`：两次发送之间的最小间隔（毫秒）
 - `send_every_n_frames`：每几帧发送一次
 
 ## 发送内容
@@ -136,6 +146,23 @@ Byte32:   0x5A
 - `dy = target_y - center_y`
 - 当前发送的是偏移量，不是绝对像素坐标
 
+### Classic CAN 分包格式（`bus_mode: can`）
+
+当 payload 大于 8 字节时，发送端会自动分包：
+
+- 首帧（最多 8 字节）
+  - Byte0: `0xA5`（分包起始标记）
+  - Byte1: 总 payload 长度（当前为 33）
+  - Byte2: 总帧数
+  - Byte3: 序号 `0`
+  - Byte4-7: payload 前 4 字节
+- 后续帧（每帧最多 8 字节）
+  - Byte0: `0x5A`（分包续传标记）
+  - Byte1: 序号 `1..N`
+  - Byte2-7: payload 数据分片（每帧最多 6 字节）
+
+下位机按序号重组后，仍然得到原始 33 字节应用层数据（头 `0xA5`、CRC16、尾 `0x5A` 均保持不变）。
+
 ## 调参
 
 高频调参参数都在 `config.yaml` 的 `detection` 段。
@@ -158,10 +185,10 @@ Byte32:   0x5A
 
 ## 联调顺序
 
-1. 先把 `can0` 按 CAN FD 参数拉起
+1. 先按 `bus_mode` 对应参数把 `can0` 拉起
 2. 用 `runtime.mode=test` 跑视频，确认检测结果稳定
 3. 打开 `can.enabled=true`
-4. 确认下位机监听的 `tx_id`、波特率、CAN FD 参数一致
+4. 确认下位机监听的 `tx_id`、波特率与总线模式一致
 5. 再切海康相机实时模式
 
 ## 常见问题
@@ -172,15 +199,23 @@ Byte32:   0x5A
 
 `CAN: 连接失败 (Operation not supported)`
 
-- 说明接口或驱动没有正确支持 CAN FD
+- 如果当前是 `canfd`，说明接口或驱动没有正确支持 CAN FD
+- 可切换 `bus_mode: can` 并按 Classic CAN 参数重配 `can0`
 
 `Classic CAN 单帧最多 8 字节`
 
 - 当前应用层包是 33 字节
-- 如果不改协议，就必须继续使用 `canfd`
+- 程序已支持自动分包发送，无需改上层 payload
+
+`CAN 发送失败: [Errno 105] 没有可用的缓冲区空间`
+
+- 说明发送速率超过当前总线可承载能力或总线 ACK 异常
+- 建议先调大 `can.min_send_interval_ms`（如 120~300）或 `can.send_every_n_frames`（如 2~5）
+- 可额外提高系统发送队列：`sudo ip link set can0 txqueuelen 1024`
+- 检查总线是否有正常应答节点、终端电阻和波特率是否匹配
 
 ## 当前限制
 
 - 仅保留 `socketcan` 通信路径
-- 当前 33 字节 payload 没有拆成多帧 Classic CAN
+- Classic CAN 采用自定义分包格式，下位机需按文档重组
 - Linux 部署时需要系统已正确提供 `can0`

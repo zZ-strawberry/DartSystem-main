@@ -24,20 +24,22 @@ camera:
 # driver: 当前仅支持 socketcan
 # interface: SocketCAN 接口名，如 can0
 # tx_id: 发送到下位机的 CAN ID
-# bus_mode: can 或 canfd；当前 33 字节 payload 想保持不变时，应使用 canfd
-# bitrate/data_bitrate: 仅用于记录；SocketCAN 接口需在系统中按相同参数预先配置并拉起
+# bus_mode: can 或 canfd；can 模式会自动把 payload 拆成多帧 Classic CAN
+# bitrate/data_bitrate: 仅用于记录；canfd 模式下需在系统侧配置 dbitrate/fd on
+# min_send_interval_ms: 发送最小间隔（毫秒），用于抑制发送拥塞
 can:
   enabled: true
   driver: "socketcan"
   interface: "can0"
   tx_id: "0x123"
   extended_id: false
-  bus_mode: "canfd"
+  bus_mode: "can"
   bitrate: 500000
   data_bitrate: 2000000
   bitrate_switch: true
   reconnect_interval_ms: 5000
-  send_every_n_frames: 1
+  min_send_interval_ms: 200
+  send_every_n_frames: 2
 
 # 绿光检测参数
 # hsv: 绿光颜色范围
