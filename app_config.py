@@ -44,6 +44,14 @@ DEFAULT_CONFIG = {
         "exposure": 16000.0,
         "gain": 15.9,
     },
+    "calibration": {
+        "fx": 15989.09,
+        "fy": 15985.61,
+        "cx": None,
+        "cy": None,
+        "image_width_px": 1440,
+        "image_height_px": 1080,
+    },
     "can": {
         "enabled": False,
         "driver": "socketcan",
@@ -92,6 +100,14 @@ DEFAULT_CONFIG = {
             "circularity_weight": 1.2,
             "fill_ratio_weight": 1.0,
             "center_weight": 0.35,
+        },
+        "angle": {
+            "focal_length_mm": 50.0,
+            "pixel_size_um": 3.45,
+            "sensor_width_mm": 4.968,
+            "native_width_px": 1440,
+            "center_x_px": None,
+            "invert_x": False,
         },
         "debug": {
             "console_log_interval_frames": 20,
@@ -180,6 +196,7 @@ def render_config_with_comments(config: dict) -> str:
     ui = config.get("ui", {})
     test = config.get("test", {})
     camera = config.get("camera", {})
+    calibration = config.get("calibration", {})
     can = config.get("can", {})
     detection = config.get("detection", {})
     hsv = detection.get("hsv", {})
@@ -188,6 +205,7 @@ def render_config_with_comments(config: dict) -> str:
     contour = detection.get("contour", {})
     circle = detection.get("circle", {})
     scoring = detection.get("scoring", {})
+    angle = detection.get("angle", {})
     debug = detection.get("debug", {})
     recording = config.get("recording", {})
 
@@ -218,6 +236,16 @@ def render_config_with_comments(config: dict) -> str:
         "camera:",
         f"  exposure: {float(camera.get('exposure', 16000.0))}",
         f"  gain: {float(camera.get('gain', 15.9))}",
+        "",
+        "# Camera calibration. fx is used for x-axis angle conversion; fy is kept for traceability.",
+        "# If cx/cy are null, the current frame center is used.",
+        "calibration:",
+        f"  fx: {float(calibration.get('fx', 15989.09))}",
+        f"  fy: {float(calibration.get('fy', 15985.61))}",
+        f"  cx: {_yaml_scalar(calibration.get('cx'))}",
+        f"  cy: {_yaml_scalar(calibration.get('cy'))}",
+        f"  image_width_px: {_yaml_scalar(calibration.get('image_width_px', 1440))}",
+        f"  image_height_px: {_yaml_scalar(calibration.get('image_height_px', 1080))}",
         "",
         "# CAN 通信参数",
         "# driver: 当前仅支持 socketcan",
@@ -283,6 +311,13 @@ def render_config_with_comments(config: dict) -> str:
             f"    circularity_weight: {float(scoring.get('circularity_weight', 1.2))}",
             f"    fill_ratio_weight: {float(scoring.get('fill_ratio_weight', 1.0))}",
             f"    center_weight: {float(scoring.get('center_weight', 0.35))}",
+            "  angle:",
+            f"    focal_length_mm: {float(angle.get('focal_length_mm', 50.0))}",
+            f"    pixel_size_um: {float(angle.get('pixel_size_um', 3.45))}",
+            f"    sensor_width_mm: {float(angle.get('sensor_width_mm', 4.968))}",
+            f"    native_width_px: {int(angle.get('native_width_px', 1440))}",
+            f"    center_x_px: {_yaml_scalar(angle.get('center_x_px'))}",
+            f"    invert_x: {str(bool(angle.get('invert_x', False))).lower()}",
             "  debug:",
             f"    console_log_interval_frames: {int(debug.get('console_log_interval_frames', 20))}",
             f"    draw_rejected: {str(bool(debug.get('draw_rejected', False))).lower()}",

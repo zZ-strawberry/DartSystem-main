@@ -20,6 +20,14 @@ camera:
   exposure: 10000.0
   gain: 5.9
 
+calibration:
+  fx: 15989.09
+  fy: 15985.61
+  cx: null
+  cy: null
+  image_width_px: 1440
+  image_height_px: 1080
+
 # CAN 通信参数
 # driver: 当前仅支持 socketcan
 # interface: SocketCAN 接口名，如 can0
@@ -79,6 +87,13 @@ detection:
     circularity_weight: 1.2
     fill_ratio_weight: 1.0
     center_weight: 0.35
+  angle:
+    focal_length_mm: 50.0
+    pixel_size_um: 3.45
+    sensor_width_mm: 4.968
+    native_width_px: 1440
+    center_x_px: null
+    invert_x: false
   debug:
     console_log_interval_frames: 20
     draw_rejected: false

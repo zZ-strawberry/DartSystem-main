@@ -439,8 +439,9 @@ class MainWindow(QMainWindow):
     def apply_runtime_config(self, config: dict, reconnect_can: bool = True) -> None:
         self.config = config
         self.camera_config = config.get("camera", {})
+        self.calibration_config = config.get("calibration", {})
         self.can_config = config.get("can", {})
-        self.detection_config = copy.deepcopy(config.get("detection", {}))
+        self.detection_config = self.build_detection_runtime_config(config.get("detection", {}))
         self.recording_config = config.get("recording", {})
         self.runtime_config = config.get("runtime", {})
         self.test_config = config.get("test", {})
@@ -471,6 +472,12 @@ class MainWindow(QMainWindow):
             self.apply_camera_parameters()
         if reconnect_can and self.can_config.get("enabled", False):
             self.setup_can()
+
+    def build_detection_runtime_config(self, detection_config: dict) -> dict:
+        runtime_detection_config = copy.deepcopy(detection_config)
+        runtime_detection_config.pop("calibration", None)
+        runtime_detection_config["calibration"] = copy.deepcopy(self.calibration_config)
+        return runtime_detection_config
 
     def apply_ui_window_visibility(self) -> None:
         display_enabled = bool(self.ui_config.get("enable_display_window", True))
@@ -615,7 +622,7 @@ class MainWindow(QMainWindow):
             return
 
         self.detection_config = copy.deepcopy(self.active_detection_config)
-        self.config["detection"] = copy.deepcopy(self.active_detection_config)
+        self.config["detection"] = self.strip_runtime_detection_config(self.active_detection_config)
         save_config(self.config, self.config_path)
         self.runtime_hint_label.setText("提示: 当前实时参数已写回 config.yaml。")
         self.config_status_label.setText(f"配置: 已保存 {self.config_path.name}")
@@ -626,6 +633,12 @@ class MainWindow(QMainWindow):
         value = max(int(value), 1)
         return value if value % 2 == 1 else value + 1
 
+    @staticmethod
+    def strip_runtime_detection_config(detection_config: dict) -> dict:
+        saved_detection_config = copy.deepcopy(detection_config)
+        saved_detection_config.pop("calibration", None)
+        return saved_detection_config
+
     def update_param_summary(self) -> None:
         detection = self.active_detection_config if self.active_detection_config else self.detection_config
         hsv = detection.get("hsv", {})
@@ -633,6 +646,8 @@ class MainWindow(QMainWindow):
         brightness = detection.get("brightness", {})
         circle = detection.get("circle", {})
         morphology = detection.get("morphology", {})
+        angle = detection.get("angle", {})
+        calibration = detection.get("calibration", {})
         mode = "Live" if self.live_tuning_enabled else "Config"
         self.param_summary_label.setText(
             "检测参数  "
@@ -645,6 +660,8 @@ class MainWindow(QMainWindow):
             f"圆度>={contour.get('min_circularity')}  "
             f"填充率>={contour.get('min_fill_ratio')}  "
             f"半径={circle.get('min_radius')}~{circle.get('max_radius')}  "
+            f"fx={calibration.get('fx')}  "
+            f"Angle={angle.get('focal_length_mm', 50.0)}mm/{angle.get('pixel_size_um', 3.45)}um  "
             f"Blur={morphology.get('blur_kernel')} Open={morphology.get('open_kernel')} Close={morphology.get('close_kernel')}"
         )
 
@@ -945,20 +962,16 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def build_detection_packet(targets: list[dict]) -> bytes:
-        near_target = targets[0] if len(targets) > 0 else None
-        far_target = targets[1] if len(targets) > 1 else None
-        near_offset = near_target["offset"] if near_target is not None else (0.0, 0.0)
-        far_offset = far_target["offset"] if far_target is not None else (0.0, 0.0)
+        near_target = MainWindow.target_by_role(targets, "near")
+        far_target = MainWindow.target_by_role(targets, "far")
         values = [
             float(len(targets)),
             1.0 if near_target is not None else 0.0,
-            float(near_offset[0]),
-            float(near_offset[1]),
+            float(near_target.get("angle_deg", 0.0)) if near_target is not None else 0.0,
             1.0 if far_target is not None else 0.0,
-            float(far_offset[0]),
-            float(far_offset[1]),
+            float(far_target.get("angle_deg", 0.0)) if far_target is not None else 0.0,
         ]
-        payload = struct.pack("<7f", *values)
+        payload = struct.pack("<5f", *values)
         length = len(payload)
         frame = bytearray([0xA5, length & 0xFF])
         frame.extend(payload)
@@ -967,16 +980,18 @@ class MainWindow(QMainWindow):
         frame.append(0x5A)
         return bytes(frame)
 
+    @staticmethod
+    def target_by_role(targets: list[dict], role: str) -> dict | None:
+        return next((target for target in targets if target.get("role") == role), None)
+
     def draw_detection_overlay(self, image_rgb, source_name, fps, targets):
         result = image_rgb.copy()
         height, width = result.shape[:2]
         center = (width // 2, height // 2)
         center_color = (255, 80, 80)
         cv2.line(result, (center[0], 0), (center[0], height), center_color, 1)
-        cv2.line(result, (0, center[1]), (width, center[1]), center_color, 1)
         cv2.circle(result, center, 8, center_color, 2)
         cv2.line(result, (center[0] - 14, center[1]), (center[0] + 14, center[1]), center_color, 2)
-        cv2.line(result, (center[0], center[1] - 14), (center[0], center[1] + 14), center_color, 2)
 
         found = bool(targets)
         lines = [
@@ -988,9 +1003,11 @@ class MainWindow(QMainWindow):
             lines.append(f"FPS: {fps:.1f}")
         for target in targets:
             metrics = target.get("metrics", {})
-            x_offset, y_offset = target.get("offset", (0, 0))
+            x_pixel = target.get("x_pixel", target.get("center", (0, 0))[0])
+            x_offset = float(target.get("x_offset", 0.0))
+            angle_deg = float(target.get("angle_deg", 0.0))
             lines.append(
-                f"{target['role'].upper()}: xy={target['center']} off=({x_offset},{y_offset}) area={target['area']:.1f}"
+                f"{target['role'].upper()}: x={x_pixel} dx={x_offset:.1f}px angle={angle_deg:.3f}deg area={target['area']:.1f}"
             )
             lines.append(
                 f"{target['role'].upper()} score={metrics.get('score', 0)} bright={metrics.get('mean_brightness', 0)} circ={metrics.get('circularity', 0)}"
@@ -1008,12 +1025,13 @@ class MainWindow(QMainWindow):
             target_center = target["center"]
             color = colors.get(target["role"], (0, 255, 255))
             line_color = line_colors.get(target["role"], (255, 255, 0))
-            x_offset, y_offset = target.get("offset", (0, 0))
+            x_offset = float(target.get("x_offset", 0.0))
+            angle_deg = float(target.get("angle_deg", 0.0))
             cv2.rectangle(result, (x, y), (x + w, y + h), color, 2)
             cv2.drawContours(result, [target["contour"]], -1, color, 2)
             cv2.circle(result, target_center, 7, color, 2)
             cv2.circle(result, target_center, 3, (255, 255, 255), -1)
-            cv2.line(result, center, target_center, line_color, 2)
+            cv2.line(result, (target_center[0], 0), (target_center[0], height), line_color, 1)
             cv2.putText(
                 result,
                 target["role"].upper(),
@@ -1027,7 +1045,7 @@ class MainWindow(QMainWindow):
             label_y = min(max(24, (center[1] + target_center[1]) // 2 - 8), max(24, height - 12))
             cv2.putText(
                 result,
-                f"dx={x_offset:.1f} dy={y_offset:.1f}",
+                f"dx={x_offset:.1f}px angle={angle_deg:.3f}deg",
                 (label_x, label_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -1041,18 +1059,19 @@ class MainWindow(QMainWindow):
 
     def update_detection_status(self, targets, source_name) -> None:
         if targets:
-            near_target = targets[0]
-            near_offset = near_target.get("offset", (0, 0))
+            near_target = self.target_by_role(targets, "near") or targets[0]
+            near_angle = float(near_target.get("angle_deg", 0.0))
             text = (
-                f"检测: 命中 {len(targets)} 个  来源={source_name}  "
-                f"近目标xy={near_target['center']} 偏移={near_offset} 面积={near_target['area']:.1f}"
+                f"Detect: hit {len(targets)} target(s) source={source_name}  "
+                f"near_x={near_target.get('x_pixel')} angle={near_angle:.3f}deg area={near_target['area']:.1f}"
             )
-            if len(targets) > 1:
-                far_target = targets[1]
-                text += f"  远目标xy={far_target['center']} 面积={far_target['area']:.1f}"
+            far_target = self.target_by_role(targets, "far")
+            if far_target is not None:
+                far_angle = float(far_target.get("angle_deg", 0.0))
+                text += f"  far_x={far_target.get('x_pixel')} angle={far_angle:.3f}deg area={far_target['area']:.1f}"
             self.detect_status_label.setText(text)
         else:
-            self.detect_status_label.setText(f"检测: 未命中  来源={source_name}")
+            self.detect_status_label.setText(f"Detect: miss source={source_name}")
 
     def maybe_log_detection(self, targets, source_name) -> None:
         interval = max(int(self.debug_config.get("console_log_interval_frames", 20)), 1)
@@ -1063,7 +1082,7 @@ class MainWindow(QMainWindow):
             for target in targets:
                 metrics = target.get("metrics", {})
                 print(
-                    f"  - {target['role']}: xy={target['center']} offset={target.get('offset')} "
+                    f"  - {target['role']}: x={target.get('x_pixel')} dx={target.get('x_offset')} angle={target.get('angle_deg')}deg "
                     f"area={target['area']:.1f} bright={metrics.get('mean_brightness')} "
                     f"circ={metrics.get('circularity')} fill={metrics.get('fill_ratio')} score={metrics.get('score')}"
                 )

@@ -7,7 +7,7 @@
 - Linux
 - `socketcan`
 - Classic CAN（自动多帧分包）或 CAN FD（单帧）
-- 应用层 payload 不变
+- 应用层 payload 发送水平转角（度）
 
 ## 功能
 
@@ -120,31 +120,31 @@ can:
 
 ## 发送内容
 
-发送给下位机的应用层数据没有改，仍然是 33 字节：
+发送给下位机的应用层数据为 25 字节，只包含水平转角：
 
 ```text
 Byte0:    0xA5
-Byte1:    Length = 28
-Byte2-29: 7个 float32，小端序
-Byte30-31: CRC16，小端序
-Byte32:   0x5A
+Byte1:    Length = 20
+Byte2-21: 5个 float32，小端序
+Byte22-23: CRC16，小端序
+Byte24:   0x5A
 ```
 
-7 个 `float32` 的含义：
+5 个 `float32` 的含义：
 
 1. `target_count`
 2. `near_flag`
-3. `near_dx`
-4. `near_dy`
-5. `far_flag`
-6. `far_dx`
-7. `far_dy`
+3. `near_angle_deg`
+4. `far_flag`
+5. `far_angle_deg`
 
 说明：
 
-- `dx = target_x - center_x`
-- `dy = target_y - center_y`
-- 当前发送的是偏移量，不是绝对像素坐标
+- 只使用目标中心的 x 轴像素位置：`x_offset = target_x - center_x`
+- 标定优先公式：`angle_deg = atan(x_offset / fx) * 180 / pi`
+- `calibration.image_width_px` 用于在当前帧宽不同于标定宽度时同步缩放 `fx/cx`
+- 如果没有 `calibration.fx`，回退到镜头估算：`angle_deg = atan((x_offset * pixel_size_um / 1000) / focal_length_mm) * 180 / pi`
+- 当前默认 `fx=15989.09`，小角度下每像素约 `0.003583°`
 
 ### Classic CAN 分包格式（`bus_mode: can`）
 
@@ -152,7 +152,7 @@ Byte32:   0x5A
 
 - 首帧（最多 8 字节）
   - Byte0: `0xA5`（分包起始标记）
-  - Byte1: 总 payload 长度（当前为 33）
+  - Byte1: 总 payload 长度（当前为 25）
   - Byte2: 总帧数
   - Byte3: 序号 `0`
   - Byte4-7: payload 前 4 字节
@@ -161,7 +161,7 @@ Byte32:   0x5A
   - Byte1: 序号 `1..N`
   - Byte2-7: payload 数据分片（每帧最多 6 字节）
 
-下位机按序号重组后，仍然得到原始 33 字节应用层数据（头 `0xA5`、CRC16、尾 `0x5A` 均保持不变）。
+下位机按序号重组后，得到 25 字节应用层数据（头 `0xA5`、CRC16、尾 `0x5A` 均保持不变）。
 
 ## 调参
 
@@ -176,6 +176,8 @@ Byte32:   0x5A
 - `detection.contour.min_circularity`
 - `detection.contour.min_fill_ratio`
 - `detection.circle.min_radius / max_radius`
+- `calibration.fx / fy / cx / cy`
+- `detection.angle.focal_length_mm / pixel_size_um / center_x_px / invert_x`
 
 界面支持：
 
@@ -204,8 +206,8 @@ Byte32:   0x5A
 
 `Classic CAN 单帧最多 8 字节`
 
-- 当前应用层包是 33 字节
-- 程序已支持自动分包发送，无需改上层 payload
+- 当前应用层包是 25 字节
+- 程序已支持自动分包发送；当前上层 payload 为 25 字节水平转角包
 
 `CAN 发送失败: [Errno 105] 没有可用的缓冲区空间`
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 import cv2
@@ -14,6 +15,18 @@ def _odd_kernel(value: int, minimum: int = 1) -> int:
     if value % 2 == 0:
         value += 1
     return value
+
+
+def _optional_float(config: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = config.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 @dataclass
@@ -153,28 +166,70 @@ class GreenLightDetector:
         if not selected_candidates and relaxed:
             selected_candidates.append(("near", sorted(candidates, key=lambda item: item["score"], reverse=True)[0]))
 
-        frame_h, frame_w = frame_shape
-        center_x = frame_w // 2
-        center_y = frame_h // 2
+        _frame_h, frame_w = frame_shape
         targets: list[dict[str, Any]] = []
         for index, (role, candidate) in enumerate(selected_candidates):
+            x_pixel = int(candidate["center"][0])
+            x_offset_px, angle_deg = self._calculate_horizontal_angle(x_pixel, frame_w)
             target = {
                 "contour": candidate["contour"],
                 "center": candidate["center"],
+                "x_pixel": x_pixel,
+                "x_offset": x_offset_px,
+                "angle_deg": angle_deg,
                 "area": candidate["area"],
                 "bbox": candidate["bbox"],
                 "circle": candidate["circle"],
                 "score": candidate["score"],
                 "metrics": candidate["metrics"],
+                # Keep the legacy key for callers that still read offset; y is no longer used.
                 "offset": (
-                    int(candidate["center"][0] - center_x),
-                    int(candidate["center"][1] - center_y),
+                    x_offset_px,
+                    0.0,
                 ),
                 "role": role,
                 "index": index,
             }
+            target["metrics"] = {
+                **target["metrics"],
+                "x_pixel": x_pixel,
+                "x_offset_px": round(x_offset_px, 2),
+                "angle_deg": round(angle_deg, 4),
+            }
             targets.append(target)
         return targets
+
+    def _calculate_horizontal_angle(self, x_pixel: int, frame_w: int) -> tuple[float, float]:
+        angle_config = self.config.get("angle", {})
+        calibration = self.config.get("calibration", {})
+
+        fx_px = _optional_float(calibration, "fx", "fx_px")
+        cx_px = _optional_float(calibration, "cx", "cx_px")
+        calibration_width_px = _optional_float(calibration, "image_width_px", "width_px")
+        if fx_px is not None and fx_px > 0.0:
+            scale_x = frame_w / calibration_width_px if calibration_width_px and calibration_width_px > 0.0 else 1.0
+            fx_px *= scale_x
+            center_x = cx_px * scale_x if cx_px is not None else frame_w / 2.0
+            x_offset_px = float(x_pixel) - center_x
+            angle_deg = math.degrees(math.atan2(x_offset_px, fx_px))
+            if bool(angle_config.get("invert_x", False)):
+                angle_deg = -angle_deg
+            return x_offset_px, angle_deg
+
+        center_x_config = angle_config.get("center_x_px")
+        center_x = float(center_x_config) if center_x_config is not None else frame_w / 2.0
+        x_offset_px = float(x_pixel) - center_x
+        focal_length_mm = max(float(angle_config.get("focal_length_mm", 50.0)), 1e-6)
+        pixel_size_um = float(angle_config.get("pixel_size_um", 3.45) or 0.0)
+        if pixel_size_um <= 0.0:
+            sensor_width_mm = float(angle_config.get("sensor_width_mm", 0.0) or 0.0)
+            pixel_size_um = (sensor_width_mm * 1000.0 / max(frame_w, 1)) if sensor_width_mm > 0.0 else 3.45
+
+        x_on_sensor_mm = x_offset_px * pixel_size_um / 1000.0
+        angle_deg = math.degrees(math.atan2(x_on_sensor_mm, focal_length_mm))
+        if bool(angle_config.get("invert_x", False)):
+            angle_deg = -angle_deg
+        return x_offset_px, angle_deg
 
     def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
         morphology = self.config.get("morphology", {})
@@ -276,11 +331,9 @@ class GreenLightDetector:
         mean_h = float(np.mean(contour_hsv[:, 0]))
         mean_s = float(np.mean(contour_hsv[:, 1]))
 
-        frame_h, frame_w = frame_shape
-        center_distance = float(
-            np.hypot(circle_x - frame_w / 2.0, circle_y - frame_h / 2.0)
-        )
-        max_distance = max(np.hypot(frame_w / 2.0, frame_h / 2.0), 1.0)
+        _frame_h, frame_w = frame_shape
+        center_distance = float(abs(circle_x - frame_w / 2.0))
+        max_distance = max(frame_w / 2.0, 1.0)
         center_score = max(0.0, 1.0 - center_distance / max_distance)
 
         score = (
@@ -368,7 +421,7 @@ def detect_green_light_and_offset(
     frame: np.ndarray,
     lower_hsv: np.ndarray | None = None,
     upper_hsv: np.ndarray | None = None,
-) -> tuple[bool, tuple[int, int], dict[str, Any] | None]:
+) -> tuple[bool, tuple[float, float], dict[str, Any] | None]:
     if lower_hsv is not None and upper_hsv is not None:
         detector.set_config(
             {
@@ -382,7 +435,7 @@ def detect_green_light_and_offset(
 
     result = detector.detect_green_light(frame)
     primary_target = result.targets[0] if result.targets else None
-    primary_offset = primary_target["offset"] if primary_target is not None else (0, 0)
+    primary_offset = (float(primary_target.get("x_offset", 0.0)), 0.0) if primary_target is not None else (0.0, 0.0)
     return result.found, primary_offset, primary_target
 
 
