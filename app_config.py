@@ -248,7 +248,7 @@ def render_config_with_comments(config: dict) -> str:
         f"  image_height_px: {_yaml_scalar(calibration.get('image_height_px', 1080))}",
         "",
         "# CAN 通信参数",
-        "# driver: 当前仅支持 socketcan",
+        "# driver: 当前发送层仅支持 Linux SocketCAN；Windows 会自动跳过发送层",
         "# interface: SocketCAN 接口名，如 can0",
         "# tx_id: 发送到下位机的 CAN ID，建议使用十六进制字符串",
         "# bus_mode: can 或 canfd；can 模式会自动把 payload 拆成多帧 Classic CAN",

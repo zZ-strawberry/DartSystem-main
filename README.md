@@ -1,13 +1,14 @@
 # DartSystem
 
-用于检测明亮的圆形绿光，并将识别结果通过 **SocketCAN** 发送到下位机。
+用于检测明亮的圆形绿光，并可在 Linux 上将识别结果通过 **SocketCAN** 发送到下位机。
 
-当前通信实现只保留这一条路径：
+当前运行/通信边界：
 
 - Linux
 - `socketcan`
 - Classic CAN（自动多帧分包）或 CAN FD（单帧）
 - 应用层 payload 发送水平转角（度）
+- Windows 可运行相机/视频检测和调参界面，但自动跳过发送层
 
 ## 功能
 
@@ -16,7 +17,7 @@
 - 双目标绿光检测
 - 近目标 / 远目标面积阈值分类
 - 实时调参与保存到 `config.yaml`
-- 通过 CAN 向下位机发送结果（Classic 分包或 CAN FD 单帧）
+- Linux 下通过 CAN 向下位机发送结果（Classic 分包或 CAN FD 单帧）
 
 ## 文件
 
@@ -82,7 +83,7 @@ test:
   auto_start: true
 ```
 
-说明：开启 `can.enabled=true` 后，`hik` 和 `test` 两种运行模式都会发送 CAN 数据。
+说明：Linux 下开启 `can.enabled=true` 后，`hik` 和 `test` 两种运行模式都会发送 CAN 数据；Windows 下会自动跳过发送层。
 
 ## CAN 配置
 
@@ -107,7 +108,7 @@ can:
 参数说明：
 
 - `enabled`：是否启用 CAN 发送
-- `driver`：当前固定使用 `socketcan`
+- `driver`：当前固定使用 `socketcan`；Windows 会自动跳过发送层
 - `interface`：SocketCAN 接口名，如 `can0`
 - `tx_id`：发送给下位机的 CAN ID
 - `extended_id`：是否使用扩展帧
@@ -220,4 +221,5 @@ Byte24:   0x5A
 
 - 仅保留 `socketcan` 通信路径
 - Classic CAN 采用自定义分包格式，下位机需按文档重组
+- Windows 可用于检测/调参，不启用发送层
 - Linux 部署时需要系统已正确提供 `can0`

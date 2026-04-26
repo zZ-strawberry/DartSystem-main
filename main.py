@@ -18,7 +18,6 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -27,7 +26,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSlider,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -237,12 +235,79 @@ class CanCommunication(QObject):
             print(f"CAN 已关闭: {self.interface_name}")
 
 
+class TuningSlider(QWidget):
+    valueChanged = pyqtSignal(object)
+
+    def __init__(
+        self,
+        minimum: float,
+        maximum: float,
+        step: float = 1.0,
+        decimals: int = 0,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.minimum = float(minimum)
+        self.maximum = float(maximum)
+        self.step = max(float(step), 1e-9)
+        self.decimals = max(int(decimals), 0)
+        self.position_count = max(int(round((self.maximum - self.minimum) / self.step)), 0)
+
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, self.position_count)
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(max(1, self.position_count // 10))
+        self.slider.setTracking(True)
+
+        self.value_label = QLabel()
+        self.value_label.setMinimumWidth(72 if self.decimals else 64)
+        self.value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self.slider, 1)
+        layout.addWidget(self.value_label)
+
+        self.slider.valueChanged.connect(self._on_slider_value_changed)
+        self._update_value_label()
+
+    def value(self):
+        raw_value = self.minimum + self.slider.value() * self.step
+        raw_value = min(max(raw_value, self.minimum), self.maximum)
+        if self.decimals == 0:
+            return int(round(raw_value))
+        return round(raw_value, self.decimals)
+
+    def setValue(self, value) -> None:
+        position = int(((float(value) - self.minimum) / self.step) + 0.5)
+        position = min(max(position, 0), self.position_count)
+        if self.slider.value() == position:
+            self._update_value_label()
+            return
+        self.slider.setValue(position)
+
+    def _format_value(self) -> str:
+        value = self.value()
+        if self.decimals == 0:
+            return str(value)
+        return f"{value:.{self.decimals}f}"
+
+    def _update_value_label(self) -> None:
+        self.value_label.setText(self._format_value())
+
+    def _on_slider_value_changed(self, _position: int) -> None:
+        self._update_value_label()
+        if not self.signalsBlocked():
+            self.valueChanged.emit(self.value())
+
+
 class TuningWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlag(Qt.WindowType.Window, True)
         self.setWindowTitle("DartSystem 实时调参")
-        self.resize(460, 980)
+        self.resize(620, 980)
 
         main_widget = QWidget(self)
         self.setCentralWidget(main_widget)
@@ -286,18 +351,13 @@ class TuningWindow(QMainWindow):
 
     @staticmethod
     def add_spin(layout, label, minimum, maximum, step=1):
-        control = QSpinBox()
-        control.setRange(minimum, maximum)
-        control.setSingleStep(step)
+        control = TuningSlider(minimum, maximum, step=step, decimals=0)
         layout.addRow(label, control)
         return control
 
     @staticmethod
     def add_double_spin(layout, label, minimum, maximum, step):
-        control = QDoubleSpinBox()
-        control.setRange(minimum, maximum)
-        control.setSingleStep(step)
-        control.setDecimals(2)
+        control = TuningSlider(minimum, maximum, step=step, decimals=2)
         layout.addRow(label, control)
         return control
 
@@ -461,16 +521,16 @@ class MainWindow(QMainWindow):
         self.config_status_label.setText(f"配置: 已加载 {self.config_path.name}")
 
         reconnect_interval = int(self.can_config.get("reconnect_interval_ms", 5000))
-        if self.can_config.get("enabled", False):
+        if self.can_config.get("enabled", False) and self.can_send_supported():
             self.reconnect_timer.start(reconnect_interval)
         else:
             self.reconnect_timer.stop()
-            self.connection_status_label.setText("CAN: 已禁用")
+            self.connection_status_label.setText(self.can_disabled_status_text())
             self._close_can()
 
         if self.camera is not None:
             self.apply_camera_parameters()
-        if reconnect_can and self.can_config.get("enabled", False):
+        if reconnect_can and self.can_config.get("enabled", False) and self.can_send_supported():
             self.setup_can()
 
     def build_detection_runtime_config(self, detection_config: dict) -> dict:
@@ -478,6 +538,15 @@ class MainWindow(QMainWindow):
         runtime_detection_config.pop("calibration", None)
         runtime_detection_config["calibration"] = copy.deepcopy(self.calibration_config)
         return runtime_detection_config
+
+    @staticmethod
+    def can_send_supported() -> bool:
+        return sys.platform.startswith("linux")
+
+    def can_disabled_status_text(self) -> str:
+        if self.can_config.get("enabled", False) and not self.can_send_supported():
+            return "CAN: Windows skipped"
+        return "CAN: disabled"
 
     def apply_ui_window_visibility(self) -> None:
         display_enabled = bool(self.ui_config.get("enable_display_window", True))
@@ -780,8 +849,13 @@ class MainWindow(QMainWindow):
         if not self.can_config.get("enabled", False):
             self.connection_status_label.setText("CAN: 已禁用")
             return
+        if not self.can_send_supported():
+            self.connection_status_label.setText("CAN: Windows skipped")
+            return
 
         driver = str(self.can_config.get("driver", "socketcan")).lower()
+        if driver == "auto":
+            driver = "socketcan"
         interface_name = str(self.can_config.get("interface", "can0")).strip()
         tx_id = self.parse_can_id(self.can_config.get("tx_id", 0x123))
         bus_mode = str(self.can_config.get("bus_mode", "can")).lower()
@@ -818,6 +892,9 @@ class MainWindow(QMainWindow):
     def refresh_connection(self) -> None:
         if not self.can_config.get("enabled", False):
             self.connection_status_label.setText("CAN: 已禁用")
+            return
+        if not self.can_send_supported():
+            self.connection_status_label.setText("CAN: Windows skipped")
             return
         if self.can_comm is not None and self.can_comm.is_connected():
             name = getattr(self.can_comm, "connection_name", "unknown")

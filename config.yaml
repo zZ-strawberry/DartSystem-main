@@ -1,5 +1,5 @@
 runtime:
-  mode: "test"  #test或hik
+  mode: "hik"  #test或hik
 
 # UI 窗口开关
 # enable_display_window: 是否显示主画面窗口（原图/掩膜/状态）
@@ -29,7 +29,7 @@ calibration:
   image_height_px: 1080
 
 # CAN 通信参数
-# driver: 当前仅支持 socketcan
+# driver: 当前发送层仅支持 Linux SocketCAN；Windows 会自动跳过发送层
 # interface: SocketCAN 接口名，如 can0
 # tx_id: 发送到下位机的 CAN ID
 # bus_mode: can 或 canfd；can 模式会自动把 payload 拆成多帧 Classic CAN
