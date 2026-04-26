@@ -78,6 +78,18 @@ def crc16_ccitt(data: bytes, initial: int = 0xFFFF) -> int:
     return crc
 
 
+PIXEL_TYPE_NAMES = {
+    17301505: "Mono8",
+    17301512: "BayerGR8",
+    17301513: "BayerRG8",
+    17301514: "BayerGB8",
+    17301515: "BayerBG8",
+    35127316: "RGB8 Packed",
+    35127317: "BGR8 Packed",
+    34603039: "YUV422 Packed",
+}
+
+
 class CanCommunication(QObject):
     connection_status = pyqtSignal(bool)
     CLASSIC_SEG_START = 0xA5
@@ -385,6 +397,7 @@ class MainWindow(QMainWindow):
         self.prev_frame_time = 0.0
         self.processed_frame_count = 0
         self.last_can_send_ts = 0.0
+        self.last_pixel_type: int | None = None
         self.live_tuning_enabled = False
         self.tuning_controls: dict[str, object] = {}
         self.tuning_window: TuningWindow | None = None
@@ -779,6 +792,7 @@ class MainWindow(QMainWindow):
         self.p_data = (c_ubyte * self.data_size)()
         self.st_frame_info = MV_FRAME_OUT_INFO_EX()  # noqa: F405
         memset(byref(self.st_frame_info), 0, sizeof(self.st_frame_info))
+        self.last_pixel_type = None
         self.camera_status_label.setText("相机: 已连接")
         print("相机初始化完成")
 
@@ -794,6 +808,14 @@ class MainWindow(QMainWindow):
         self.camera_status_label.setText(
             f"相机: 已连接  曝光={current_exposure or exposure:.1f}  增益={current_gain or gain:.1f}"
         )
+
+    def update_pixel_type_status(self, pixel_type: int) -> None:
+        if self.last_pixel_type == pixel_type:
+            return
+        self.last_pixel_type = pixel_type
+        pixel_type_name = PIXEL_TYPE_NAMES.get(pixel_type, f"Unknown({pixel_type})")
+        print(f"Camera PixelType: {pixel_type_name} ({pixel_type})")
+        self.camera_status_label.setText(f"相机: PixelType={pixel_type_name} ({pixel_type})")
 
     def enable_debug_mode(self, reason: str) -> None:
         self.debug_mode = True
@@ -918,10 +940,10 @@ class MainWindow(QMainWindow):
             return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
 
         bayer_to_rgb = {
-            17301513: cv2.COLOR_BAYER_GB2RGB,  # BayerGB8
-            17301514: cv2.COLOR_BAYER_RG2RGB,  # BayerRG8
-            17301515: cv2.COLOR_BAYER_GR2RGB,  # BayerGR8
-            17301516: cv2.COLOR_BAYER_BG2RGB,  # BayerBG8
+            17301513: cv2.COLOR_BAYER_BG2RGB,  # BayerRG8
+            17301514: cv2.COLOR_BAYER_GB2RGB,  # BayerGB8
+            17301512: cv2.COLOR_BAYER_GR2RGB,  # BayerGR8
+            17301515: cv2.COLOR_BAYER_RG2RGB,  # BayerBG8
         }
         if pixel_type in bayer_to_rgb:
             raw = frame_data[:mono_size].reshape((height, width))
@@ -967,6 +989,7 @@ class MainWindow(QMainWindow):
         height = int(self.st_frame_info.nHeight)
         width = int(self.st_frame_info.nWidth)
         pixel_type = self.st_frame_info.enPixelType
+        self.update_pixel_type_status(pixel_type)
         image_rgb = self._convert_raw_frame_to_rgb(frame_data, width, height, pixel_type)
         if image_rgb is None:
             return False, None
