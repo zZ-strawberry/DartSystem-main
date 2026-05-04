@@ -142,18 +142,21 @@ class GreenLightDetector:
             return []
 
         contour_config = self.config.get("contour", {})
+        min_area = float(contour_config.get("min_area", 60))
+        max_area = float(contour_config.get("max_area", 20000))
         far_min_area = float(contour_config.get("far_min_area", contour_config.get("min_area", 60)))
         near_min_area = float(contour_config.get("near_min_area", 300))
-        if relaxed:
-            far_min_area = max(20.0, far_min_area * 0.5)
-            near_min_area = max(far_min_area, near_min_area * 0.6)
 
         near_candidates = []
         far_candidates = []
         for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
-            if candidate["area"] >= near_min_area:
+            area = float(candidate["area"])
+            if area < min_area or area > max_area:
+                continue
+            # Area classification is strict: valid circle first, then far/near split.
+            if area > near_min_area:
                 near_candidates.append(candidate)
-            elif candidate["area"] >= far_min_area:
+            elif far_min_area < area < near_min_area:
                 far_candidates.append(candidate)
 
         selected_candidates: list[tuple[str, dict[str, Any]]] = []
@@ -163,9 +166,6 @@ class GreenLightDetector:
             selected_candidates.append(("far", far_candidates[0]))
 
         # 宽松阶段兜底：只要有明显候选，就至少输出一个目标。
-        if not selected_candidates and relaxed:
-            selected_candidates.append(("near", sorted(candidates, key=lambda item: item["score"], reverse=True)[0]))
-
         _frame_h, frame_w = frame_shape
         targets: list[dict[str, Any]] = []
         for index, (role, candidate) in enumerate(selected_candidates):
@@ -250,6 +250,132 @@ class GreenLightDetector:
             refined = cv2.dilate(refined, close_element, iterations=dilate_iterations)
         return refined
 
+    @staticmethod
+    def _contour_geometry(contour: np.ndarray) -> dict[str, Any] | None:
+        area = float(cv2.contourArea(contour))
+        if area <= 0.0:
+            return None
+
+        perimeter = float(cv2.arcLength(contour, True))
+        if perimeter <= 0.0:
+            return None
+
+        x, y, w, h = cv2.boundingRect(contour)
+        if w <= 0 or h <= 0:
+            return None
+
+        circularity = float(4.0 * np.pi * area / (perimeter * perimeter))
+        aspect_ratio = float(min(w, h) / max(w, h))
+        (circle_x, circle_y), radius = cv2.minEnclosingCircle(contour)
+        enclosing_area = float(np.pi * radius * radius)
+        fill_ratio = float(area / enclosing_area) if enclosing_area > 0.0 else 0.0
+
+        moments = cv2.moments(contour)
+        if abs(float(moments["m00"])) > 1e-6:
+            center_x = float(moments["m10"] / moments["m00"])
+            center_y = float(moments["m01"] / moments["m00"])
+        else:
+            center_x = float(circle_x)
+            center_y = float(circle_y)
+
+        return {
+            "area": area,
+            "perimeter": perimeter,
+            "bbox": (x, y, w, h),
+            "circularity": circularity,
+            "aspect_ratio": aspect_ratio,
+            "circle_center": (float(circle_x), float(circle_y)),
+            "center": (center_x, center_y),
+            "radius": float(radius),
+            "fill_ratio": fill_ratio,
+        }
+
+    def _select_core_contour(
+        self,
+        contour: np.ndarray,
+        value_channel: np.ndarray,
+        min_v_threshold: float,
+        min_area: float,
+        relaxed: bool = False,
+    ) -> np.ndarray:
+        geometry = self._contour_geometry(contour)
+        if geometry is None:
+            return contour
+
+        x, y, w, h = geometry["bbox"]
+        contour_shift = np.array([[[x, y]]], dtype=np.int32)
+        local_contour = contour.astype(np.int32, copy=False) - contour_shift
+
+        contour_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(contour_mask, [local_contour], -1, 255, thickness=-1)
+        contour_values = value_channel[y : y + h, x : x + w][contour_mask == 255]
+        if contour_values.size < 24:
+            return contour
+
+        value_roi = value_channel[y : y + h, x : x + w]
+        morphology = self.config.get("morphology", {})
+        core_kernel = _odd_kernel(morphology.get("core_kernel", 3))
+        core_element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (core_kernel, core_kernel))
+
+        contour_values_f = contour_values.astype(np.float32, copy=False)
+        mean_value = float(np.mean(contour_values_f))
+        max_value = float(np.max(contour_values_f))
+        threshold_candidates = {
+            max(float(min_v_threshold), mean_value + (max_value - mean_value) * (0.28 if relaxed else 0.38)),
+            max(float(min_v_threshold), mean_value + (max_value - mean_value) * (0.45 if relaxed else 0.58)),
+            max(float(min_v_threshold), float(np.percentile(contour_values_f, 60.0 if relaxed else 72.0))),
+            max(float(min_v_threshold), float(np.percentile(contour_values_f, 74.0 if relaxed else 86.0))),
+        }
+
+        parent_center = np.array(geometry["center"], dtype=np.float32)
+        parent_area = max(float(geometry["area"]), 1.0)
+        parent_radius = max(float(geometry["radius"]), 1.0)
+        min_core_area = max(float(min_area) * 0.8, parent_area * (0.18 if not relaxed else 0.10))
+        min_shape_gain = 0.16 if not relaxed else 0.10
+        parent_shape_score = geometry["circularity"] * 2.0 + geometry["fill_ratio"] * 1.6
+
+        best_contour = contour
+        best_geometry = geometry
+        best_score = -1e9
+        for local_threshold in sorted(threshold_candidates):
+            core_mask = np.zeros((h, w), dtype=np.uint8)
+            core_mask[(contour_mask == 255) & (value_roi >= local_threshold)] = 255
+            if core_kernel > 1:
+                core_mask = cv2.morphologyEx(core_mask, cv2.MORPH_OPEN, core_element)
+                core_mask = cv2.morphologyEx(core_mask, cv2.MORPH_CLOSE, core_element)
+
+            core_contours, _ = cv2.findContours(core_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for core_contour in core_contours:
+                full_contour = core_contour.astype(np.int32, copy=False) + contour_shift
+                core_geometry = self._contour_geometry(full_contour)
+                if core_geometry is None:
+                    continue
+                if core_geometry["area"] < min_core_area:
+                    continue
+
+                center_gap = float(np.linalg.norm(np.array(core_geometry["center"], dtype=np.float32) - parent_center))
+                center_gap_ratio = center_gap / parent_radius
+                area_ratio = min(float(core_geometry["area"]) / parent_area, 1.0)
+                score = (
+                    core_geometry["circularity"] * 2.8
+                    + core_geometry["fill_ratio"] * 1.8
+                    + area_ratio * 0.2
+                    - center_gap_ratio * 0.5
+                )
+                if score > best_score:
+                    best_score = score
+                    best_contour = full_contour
+                    best_geometry = core_geometry
+
+        if best_contour is contour:
+            return contour
+        best_shape_score = best_geometry["circularity"] * 2.0 + best_geometry["fill_ratio"] * 1.6
+        if best_shape_score < parent_shape_score + min_shape_gain:
+            return contour
+        if best_geometry["circularity"] + 0.01 < geometry["circularity"]:
+            return contour
+        return best_contour
+
     def _evaluate_candidate(
         self,
         contour: np.ndarray,
@@ -274,8 +400,6 @@ class GreenLightDetector:
         max_std_threshold = float(brightness_config.get("max_std", 90))
 
         if relaxed:
-            min_area = max(20.0, min_area * 0.5)
-            max_area = max_area * 1.5
             min_circularity = max(0.35, min_circularity - 0.15)
             min_aspect_ratio = max(0.35, min_aspect_ratio - 0.15)
             min_fill_ratio = max(0.35, min_fill_ratio - 0.15)
@@ -284,33 +408,39 @@ class GreenLightDetector:
             min_v_threshold = max(80.0, min_v_threshold * 0.6)
             max_std_threshold = max_std_threshold * 1.8
 
-        area = float(cv2.contourArea(contour))
+        contour = self._select_core_contour(
+            contour,
+            value_channel,
+            min_v_threshold=min_v_threshold,
+            min_area=min_area,
+            relaxed=relaxed,
+        )
+
+        geometry = self._contour_geometry(contour)
+        if geometry is None:
+            return None
+
+        area = float(geometry["area"])
         if area < min_area:
             return None
         if area > max_area:
             return None
 
-        perimeter = cv2.arcLength(contour, True)
-        if perimeter <= 0:
-            return None
-
-        circularity = float(4.0 * np.pi * area / (perimeter * perimeter))
+        circularity = float(geometry["circularity"])
         if circularity < min_circularity:
             return None
 
-        x, y, w, h = cv2.boundingRect(contour)
-        if w <= 0 or h <= 0:
-            return None
-        aspect_ratio = float(min(w, h) / max(w, h))
+        x, y, w, h = geometry["bbox"]
+        aspect_ratio = float(geometry["aspect_ratio"])
         if aspect_ratio < min_aspect_ratio:
             return None
 
-        (circle_x, circle_y), radius = cv2.minEnclosingCircle(contour)
+        circle_x, circle_y = geometry["circle_center"]
+        radius = float(geometry["radius"])
         if radius < min_radius or radius > max_radius:
             return None
 
-        enclosing_area = np.pi * radius * radius
-        fill_ratio = float(area / enclosing_area) if enclosing_area > 0 else 0.0
+        fill_ratio = float(geometry["fill_ratio"])
         if fill_ratio < min_fill_ratio:
             return None
 

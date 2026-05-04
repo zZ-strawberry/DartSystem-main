@@ -1131,6 +1131,7 @@ class MainWindow(QMainWindow):
             cv2.drawContours(result, [target["contour"]], -1, color, 2)
             cv2.circle(result, target_center, 7, color, 2)
             cv2.circle(result, target_center, 3, (255, 255, 255), -1)
+            cv2.line(result, center, target_center, line_color, 2, cv2.LINE_AA)
             cv2.line(result, (target_center[0], 0), (target_center[0], height), line_color, 1)
             cv2.putText(
                 result,
